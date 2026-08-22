@@ -1,0 +1,17 @@
+set(srcs 
+         "src/poom_nfc_ats.c"
+         "src/poom_nfc_card_ident.c"
+         "src/poom_nfc_emulator.c"
+         "src/poom_nfc_dump.c"
+         "src/poom_nfc_mifare_classic.c"
+         "src/poom_nfc_reader.c"
+         "src/poom_nfc_controller.c"
+         "src/poom_nfc_tuning.c"
+         "src/poom_nfc_core.c"
+         "src/poom_nfc_store.c"
+         "src/poom_nfc_iso14443_4.c"
+         "src/poom_nfc_debug.c"
+         "src/poom_nfc_profile_store.c")
+idf_component_register( SRCS "${srcs}"
+                INCLUDE_DIRS "include"
+                REQUIRES nfcal poom_secrets_store sd_card)
