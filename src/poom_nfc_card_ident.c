@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 THE POOM
+
 #include "poom_nfc_card_ident.h"
 #include <string.h>
 #include "rfal_nfc.h"

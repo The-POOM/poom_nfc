@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 THE POOM
+
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>

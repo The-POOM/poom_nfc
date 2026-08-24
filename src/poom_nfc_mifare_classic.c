@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 THE POOM
+
 /* MIFARE Classic / Mini support. */
 #include "poom_nfc_mifare_classic.h"
 #include "poom_nfc_mifare_test_dict.h"
@@ -2599,15 +2602,179 @@ static void poom_mifare_format_uid_spaced_(char* out, size_t out_len, const uint
     }
 }
 
-bool poom_mifare_classic_dump_to_flipper_file(const char* out_dir,
+typedef enum
+{
+    POOM_MIFARE_DUMP_FMT_FLIPPER = 0,
+    POOM_MIFARE_DUMP_FMT_POOM_MEMORY,
+} poom_mifare_dump_format_t;
+
+static const char* poom_mifare_dump_ext_(poom_mifare_dump_format_t format)
+{
+    (void)format;
+    return ".nfc";
+}
+
+static const char* poom_mifare_dump_name_suffix_(poom_mifare_dump_format_t format)
+{
+    return (format == POOM_MIFARE_DUMP_FMT_POOM_MEMORY) ? "_poom" : "";
+}
+
+static const char* poom_mifare_dump_label_(poom_mifare_dump_format_t format)
+{
+    return (format == POOM_MIFARE_DUMP_FMT_POOM_MEMORY) ? "POOM memory image" : "Flipper .nfc";
+}
+
+static void poom_mifare_format_key_hex_(char out[13], const uint8_t key[6])
+{
+    if(out == NULL)
+    {
+        return;
+    }
+
+    if(key == NULL)
+    {
+        (void)snprintf(out, 13, "Unknown");
+        return;
+    }
+
+    (void)snprintf(out,
+                   13,
+                   "%02X%02X%02X%02X%02X%02X",
+                   (unsigned)key[0],
+                   (unsigned)key[1],
+                   (unsigned)key[2],
+                   (unsigned)key[3],
+                   (unsigned)key[4],
+                   (unsigned)key[5]);
+}
+
+static bool poom_mifare_write_dump_header_(const char* path,
+                                           poom_mifare_dump_format_t format,
+                                           const char* uid_hdr,
+                                           uint8_t sectors)
+{
+    char header[512];
+    uint16_t max_block = poom_mifare_max_block_for_type(s_mf_ctx.card_type);
+    uint16_t block_count = (max_block > 0U) ? (uint16_t)(max_block + 1U) : 0U;
+
+    if(format == POOM_MIFARE_DUMP_FMT_POOM_MEMORY)
+    {
+        (void)snprintf(header,
+                       sizeof(header),
+                       "Filetype: POOM NFC memory image\n"
+                       "Version: 1\n\n"
+                       "Protocol: ISO14443-A\n"
+                       "Device type: Mifare Classic\n"
+                       "Card subtype: %s\n"
+                       "UID:%s%s\n"
+                       "ATQA: %02X %02X\n"
+                       "SAK: %02X\n\n"
+                       "Data format: block-dump\n"
+                       "Data format version: 1\n"
+                       "Block size: 16\n"
+                       "Sector count: %u\n"
+                       "Block count: %u\n\n",
+                       poom_mifare_flipper_type_label_(s_mf_ctx.card_type),
+                       (s_mf_ctx.uid_len > 0U) ? " " : "",
+                       (s_mf_ctx.uid_len > 0U) ? uid_hdr : "",
+                       (unsigned)((s_mf_ctx.atqa >> 8) & 0xFFU),
+                       (unsigned)(s_mf_ctx.atqa & 0xFFU),
+                       (unsigned)s_mf_ctx.sak,
+                       (unsigned)sectors,
+                       (unsigned)block_count);
+    }
+    else
+    {
+        (void)snprintf(header,
+                       sizeof(header),
+                       "Filetype: Flipper NFC device\n"
+                       "Version: 4\n"
+                       "Device type: Mifare Classic\n"
+                       "UID:%s%s\n"
+                       "ATQA: %02X %02X\n"
+                       "SAK: %02X\n"
+                       "Mifare Classic type: %s\n"
+                       "Data format version: 2\n",
+                       (s_mf_ctx.uid_len > 0U) ? " " : "",
+                       (s_mf_ctx.uid_len > 0U) ? uid_hdr : "",
+                       (unsigned)((s_mf_ctx.atqa >> 8) & 0xFFU),
+                       (unsigned)(s_mf_ctx.atqa & 0xFFU),
+                       (unsigned)s_mf_ctx.sak,
+                       poom_mifare_flipper_type_label_(s_mf_ctx.card_type));
+    }
+
+    header[sizeof(header) - 1U] = '\0';
+
+    if(sd_card_write_file(path, header) != ESP_OK)
+    {
+        printf("  mifare dump: write header failed\r\n");
+        return false;
+    }
+
+    return true;
+}
+
+static bool poom_mifare_append_security_section_(const char* path, uint8_t sectors)
+{
+    char line[96];
+
+    if(sd_card_append_to_file(path, "\n# Security\n") != ESP_OK)
+    {
+        printf("  mifare dump: append security header failed\r\n");
+        return false;
+    }
+
+    for(uint8_t s = 0U; s < sectors; s++)
+    {
+        char key_hex[13];
+        const uint8_t* ka = poom_mifare_get_sector_key_ptr_(s, POOM_MIFARE_KEY_A);
+        const uint8_t* kb = poom_mifare_get_sector_key_ptr_(s, POOM_MIFARE_KEY_B);
+
+        if(ka != NULL)
+        {
+            poom_mifare_format_key_hex_(key_hex, ka);
+            (void)snprintf(line, sizeof(line), "Sector %u Key A: %s\n", (unsigned)s, key_hex);
+        }
+        else
+        {
+            (void)snprintf(line, sizeof(line), "Sector %u Key A: Unknown\n", (unsigned)s);
+        }
+        line[sizeof(line) - 1U] = '\0';
+        if(sd_card_append_to_file(path, line) != ESP_OK)
+        {
+            printf("  mifare dump: append security failed\r\n");
+            return false;
+        }
+
+        if(kb != NULL)
+        {
+            poom_mifare_format_key_hex_(key_hex, kb);
+            (void)snprintf(line, sizeof(line), "Sector %u Key B: %s\n", (unsigned)s, key_hex);
+        }
+        else
+        {
+            (void)snprintf(line, sizeof(line), "Sector %u Key B: Unknown\n", (unsigned)s);
+        }
+        line[sizeof(line) - 1U] = '\0';
+        if(sd_card_append_to_file(path, line) != ESP_OK)
+        {
+            printf("  mifare dump: append security failed\r\n");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool poom_mifare_classic_dump_to_file_(const char* out_dir,
                                               bool try_key_b,
                                               char* out_path,
-                                              size_t out_path_len)
+                                              size_t out_path_len,
+                                              poom_mifare_dump_format_t format)
 {
     char uid_part[64];
     char uid_hdr[64];
     char path[160];
-    char header[320];
     char line[196];
     const char* dir = (out_dir != NULL && out_dir[0] != '\0') ? out_dir : "/nfc";
     uint8_t sectors;
@@ -2665,10 +2832,12 @@ bool poom_mifare_classic_dump_to_flipper_file(const char* out_dir,
     poom_mifare_format_uid_spaced_(uid_hdr, sizeof(uid_hdr), s_mf_ctx.uid, s_mf_ctx.uid_len);
     (void)snprintf(path,
                    sizeof(path),
-                   "%s/%s_%s.nfc",
+                   "%s/%s_%s%s%s",
                    dir,
                    poom_mifare_flipper_type_prefix_(s_mf_ctx.card_type),
-                   uid_part);
+                   uid_part,
+                   poom_mifare_dump_name_suffix_(format),
+                   poom_mifare_dump_ext_(format));
     path[sizeof(path) - 1U] = '\0';
 
     if(out_path != NULL && out_path_len > 0U)
@@ -2683,27 +2852,8 @@ bool poom_mifare_classic_dump_to_flipper_file(const char* out_dir,
         s_mf_ctx.sak = 0U;
     }
 
-    (void)snprintf(header,
-                   sizeof(header),
-                   "Filetype: Flipper NFC device\n"
-                   "Version: 4\n"
-                   "Device type: Mifare Classic\n"
-                   "UID:%s%s\n"
-                   "ATQA: %02X %02X\n"
-                   "SAK: %02X\n"
-                   "Mifare Classic type: %s\n"
-                   "Data format version: 2\n",
-                   (s_mf_ctx.uid_len > 0U) ? " " : "",
-                   (s_mf_ctx.uid_len > 0U) ? uid_hdr : "",
-                   (unsigned)((s_mf_ctx.atqa >> 8) & 0xFFU),
-                   (unsigned)(s_mf_ctx.atqa & 0xFFU),
-                   (unsigned)s_mf_ctx.sak,
-                   poom_mifare_flipper_type_label_(s_mf_ctx.card_type));
-    header[sizeof(header) - 1U] = '\0';
-
-    if(sd_card_write_file(path, header) != ESP_OK)
+    if(!poom_mifare_write_dump_header_(path, format, uid_hdr, sectors))
     {
-        printf("  mifare dump: write header failed\r\n");
         return false;
     }
 
@@ -2823,6 +2973,30 @@ bool poom_mifare_classic_dump_to_flipper_file(const char* out_dir,
         }
     }
 
-    printf("  mifare dump saved: %s\r\n", path);
+    if(format == POOM_MIFARE_DUMP_FMT_POOM_MEMORY &&
+       !poom_mifare_append_security_section_(path, sectors))
+    {
+        return false;
+    }
+
+    printf("  mifare dump saved (%s): %s\r\n", poom_mifare_dump_label_(format), path);
     return true;
+}
+
+bool poom_mifare_classic_dump_to_flipper_file(const char* out_dir,
+                                              bool try_key_b,
+                                              char* out_path,
+                                              size_t out_path_len)
+{
+    return poom_mifare_classic_dump_to_file_(
+        out_dir, try_key_b, out_path, out_path_len, POOM_MIFARE_DUMP_FMT_FLIPPER);
+}
+
+bool poom_mifare_classic_dump_to_poom_memory_file(const char* out_dir,
+                                                  bool try_key_b,
+                                                  char* out_path,
+                                                  size_t out_path_len)
+{
+    return poom_mifare_classic_dump_to_file_(
+        out_dir, try_key_b, out_path, out_path_len, POOM_MIFARE_DUMP_FMT_POOM_MEMORY);
 }

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 THE POOM
+
 /* Auto-generated test dictionary for MIFARE key trials. */
 #pragma once
 

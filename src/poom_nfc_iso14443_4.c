@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 THE POOM
+
 /*
  * POOM NFC reader (refactor, printf-only)
  *
@@ -498,6 +501,7 @@ static bool poom_ascii_hex_to_bytes(const char *ascii, uint8_t *out, uint16_t ou
  * ========================================================================== */
 
 void poom_reader_set_verbose(bool enable) { poom_verbose = enable; }
+bool poom_reader_is_verbose(void) { return poom_verbose; }
 
 bool poom_reader_set_iso_dep_chunk_len(uint8_t value_1_to_250)
 {
@@ -822,7 +826,7 @@ static void poom_iso_dep_session_init(void)
  * @param[in] capdu_len APDU length in bytes.
  * @return true on successful exchange, false otherwise.
  */
-static bool poom_iso_dep_exchange_apdu(uint8_t *capdu, uint32_t capdu_len)
+static bool poom_iso_dep_exchange_apdu(uint8_t *capdu, uint32_t capdu_len, bool print_final_rapdu)
 {
 	ReturnCode ret;
 	uint32_t offset = 0;
@@ -879,8 +883,10 @@ static bool poom_iso_dep_exchange_apdu(uint8_t *capdu, uint32_t capdu_len)
 		}
 	}
 
-	printf("R-APDU: ");
-	poom_print_hex(poom_rapdu, poom_rapdu_len);
+	if (print_final_rapdu) {
+		printf("R-APDU: ");
+		poom_print_hex(poom_rapdu, poom_rapdu_len);
+	}
 	return true;
 }
 
@@ -1052,9 +1058,9 @@ bool poom_reader_send_raw_hex(const char *ascii_hex)
 			printf("Error: connected NFC-A card is not ISO-DEP (no RATS/ATS).\n");
 			return false;
 		}
-		return poom_iso_dep_exchange_apdu(poom_ascii_hex_buf, poom_ascii_hex_len);
-	} else if (poom_mode == RFAL_MODE_POLL_NFCB) {
-		return poom_iso_dep_exchange_apdu(poom_ascii_hex_buf, poom_ascii_hex_len);
+			return poom_iso_dep_exchange_apdu(poom_ascii_hex_buf, poom_ascii_hex_len, true);
+		} else if (poom_mode == RFAL_MODE_POLL_NFCB) {
+			return poom_iso_dep_exchange_apdu(poom_ascii_hex_buf, poom_ascii_hex_len, true);
 	} else if (poom_mode == RFAL_MODE_POLL_NFCV) {
 		memcpy(poom_tx, poom_ascii_hex_buf, poom_ascii_hex_len);
 		poom_tx_len = (uint16_t)poom_ascii_hex_len;
@@ -1063,6 +1069,59 @@ bool poom_reader_send_raw_hex(const char *ascii_hex)
 		printf("Error: no card detected. Run poom_reader_connect_card() first.\n");
 		return false;
 	}
+}
+
+bool poom_reader_isodep_transceive_apdu(const uint8_t* apdu,
+                                        size_t apdu_len,
+                                        uint8_t* out_rapdu,
+                                        size_t out_max,
+                                        size_t* out_len)
+{
+	if(out_len == NULL)
+	{
+		return false;
+	}
+
+	*out_len = 0U;
+
+	if(apdu == NULL || apdu_len == 0U || apdu_len > POOM_NFC_BUF_MAX)
+	{
+		return false;
+	}
+
+	if(poom_mode == RFAL_MODE_POLL_NFCA)
+	{
+		if(!poom_nfca_isodep_active)
+		{
+			return false;
+		}
+	}
+	else if(poom_mode != RFAL_MODE_POLL_NFCB)
+	{
+		return false;
+	}
+
+	memcpy(poom_ascii_hex_buf, apdu, apdu_len);
+	poom_ascii_hex_len = (uint16_t)apdu_len;
+
+	if(!poom_iso_dep_exchange_apdu(poom_ascii_hex_buf, poom_ascii_hex_len, false))
+	{
+		return false;
+	}
+
+	*out_len = (size_t)poom_rapdu_len;
+	if(poom_rapdu_len == 0U)
+	{
+		return false;
+	}
+
+	if(out_rapdu == NULL || out_max < (size_t)poom_rapdu_len)
+	{
+		return false;
+	}
+
+	memcpy(out_rapdu, poom_rapdu, poom_rapdu_len);
+	return true;
 }
 
 bool poom_reader_get_last_rapdu(uint8_t* out_rapdu, size_t out_max, size_t* out_len)

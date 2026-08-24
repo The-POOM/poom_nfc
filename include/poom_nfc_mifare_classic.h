@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 THE POOM
+
 /* MIFARE Classic / Mini support. */
 #pragma once
 
@@ -131,6 +134,28 @@ bool poom_mifare_classic_dump_to_flipper_file(const char* out_dir,
                                               bool try_key_b,
                                               char* out_path,
                                               size_t out_path_len);
+
+/**
+ * @brief Dump all Classic blocks to a POOM memory image file on the SD card.
+ *
+ * The file is written under the provided directory (e.g. "/nfc") and uses a
+ * name derived from card type + UID (e.g. "Classic1K_04-11-22-33_poom.nfc").
+ *
+ * The header is POOM-specific while the memory body keeps the block-oriented
+ * layout used by MIFARE Classic dumps (`Block N: ...`).
+ *
+ * This is intended for authorized testing and development environments only.
+ *
+ * @param[in] out_dir Output directory on SD root (e.g. "/nfc").
+ * @param[in] try_key_b When true, attempt Key B discovery as well.
+ * @param[out] out_path Full relative output path written (may be NULL).
+ * @param[in] out_path_len Length of out_path buffer.
+ * @return true on success.
+ */
+bool poom_mifare_classic_dump_to_poom_memory_file(const char* out_dir,
+                                                  bool try_key_b,
+                                                  char* out_path,
+                                                  size_t out_path_len);
 
 #ifdef __cplusplus
 }

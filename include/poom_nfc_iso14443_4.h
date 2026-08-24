@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 THE POOM
+
 /*
  * poom_nfc_iso14443_4.h
  *
@@ -37,6 +40,7 @@ extern "C" {
  * Enable/disable verbose logging (prints TX/RX frames).
  */
 void poom_reader_set_verbose(bool enable);
+bool poom_reader_is_verbose(void);
 
 /**
  * Set ISO-DEP chunk length (1..250).
@@ -83,6 +87,21 @@ bool poom_reader_connect_card(void);
  *  - Always prints the final R-APDU for ISO-DEP as hex.
  */
 bool poom_reader_send_raw_hex(const char *ascii_hex);
+
+/**
+ * Send one binary C-APDU to the currently connected ISO-DEP card.
+ *
+ * This is a reusable transport helper for higher layers such as ISO7816, EMV,
+ * or other APDU-based protocols. It does not interpret the APDU contents.
+ *
+ * Returns true only when the exchange succeeds at link level and an R-APDU is
+ * available. The returned R-APDU still contains the trailing SW1/SW2 bytes.
+ */
+bool poom_reader_isodep_transceive_apdu(const uint8_t* apdu,
+                                        size_t apdu_len,
+                                        uint8_t* out_rapdu,
+                                        size_t out_max,
+                                        size_t* out_len);
 
 /**
  * Copy the last ISO-DEP R-APDU returned by poom_reader_send_raw_hex().

@@ -57,6 +57,10 @@ The component is registered by `applications/poom_nfc/CMakeLists.txt` and curren
 - `poom_secrets_store`
 - `sd_card`
 
+## License
+
+`poom_nfc` source files are licensed under `GPL-3.0-or-later`.
+
 ## Public API
 
 ### Core lifecycle
@@ -89,6 +93,15 @@ The component is registered by `applications/poom_nfc/CMakeLists.txt` and curren
 
 - `bool poom_reader_connect_card(void)`
 - `bool poom_reader_send_raw_hex(const char *ascii_hex)`
+- `bool poom_reader_isodep_transceive_apdu(...)`
+
+### ISO7816 / TLV / EMV
+
+- `bool poom_iso7816_parse_rapdu(...)`
+- `size_t poom_iso7816_build_select_df_name(...)`
+- `bool poom_nfc_emv_select_ppse(...)`
+- `bool poom_nfc_emv_select_aid(...)`
+- `bool poom_nfc_emv_parse_ppse_apps(...)`
 
 ### MIFARE Classic
 
@@ -97,6 +110,7 @@ The component is registered by `applications/poom_nfc/CMakeLists.txt` and curren
 - `bool poom_mifare_classic_write_block(uint8_t block, const uint8_t data[16])`
 - `bool poom_mifare_classic_discover_default_keys(bool try_key_b)`
 - `bool poom_mifare_classic_dump_to_flipper_file(...)`
+- `bool poom_mifare_classic_dump_to_poom_memory_file(...)`
 
 ### Tuning and emulation
 
@@ -201,7 +215,8 @@ nfc-core-stop
 - `nfc-mfc-read <block>`
 - `nfc-mfc-write <block> <hex...>`
 - `nfc-mfc-keys <block>`
-- `nfc-mfc-dump [out_dir] [-b]`
+- `nfc-mfc-dump [-b]`
+- `nfc-mfc-dump-poom [-b]`
 
 ### Local emulation
 
@@ -287,6 +302,30 @@ nfc-core-stop
 - If `READ_SIG (0x3C)` succeeds, the signature is included in the `.nfc`.
 - The emulator supports Flipper-style `.nfc`, POOM `.nfc`, and legacy `.bin`.
 
+### EMV / ISO7816
+
+Recommended flow:
+
+```bash
+nfc-core-start
+nfc-card-connect
+nfc-emv-discover
+nfc-emv-select A0000000041010
+```
+
+**`nfc-emv-discover`**
+
+- Selects PPSE (`2PAY.SYS.DDF01`) over ISO-DEP.
+- Parses BER-TLV and lists advertised payment applications.
+- Prints AID, Application Label, and priority when present.
+- Treats non-`90 00` replies as valid R-APDUs, not NFC transport failures.
+
+**`nfc-emv-select <AID>`**
+
+- Selects one EMV application by AID.
+- AID is passed as hex, for example `A0000000041010`.
+- Prints the returned status words and, in verbose reader mode, a decoded TLV view.
+
 ### MIFARE Classic
 
 Recommended flow:
@@ -297,7 +336,8 @@ nfc-card-connect
 nfc-mfc-discover
 nfc-mfc-read 4
 nfc-mfc-write 4 00112233445566778899AABBCCDDEEFF
-nfc-mfc-dump /nfc
+nfc-mfc-dump
+nfc-mfc-dump-poom
 ```
 
 **`nfc-mfc-discover [-b]`**
@@ -329,11 +369,21 @@ nfc-mfc-dump /nfc
 - Shows known Key A / Key B values for the sector of the given block.
 - MIFARE Classic uses per-sector keys, not per-block passwords.
 
-**`nfc-mfc-dump [out_dir] [-b]`**
+**`nfc-mfc-dump [-b]`**
 
 - Reads blocks and saves a Flipper-compatible MIFARE Classic `.nfc` file.
+- Always writes to `/nfc` on SD.
 - Requires the card to stay present during the dump.
 - Uses known sector keys and can optionally try Key B with `-b`.
+
+**`nfc-mfc-dump-poom [-b]`**
+
+- Reads blocks and saves a POOM MIFARE Classic memory image as `.nfc`.
+- The file keeps a POOM header and a block-oriented body (`Block N: ...`).
+- Appends a short per-sector key summary when keys are known.
+- Always writes to `/nfc` on SD.
+- Uses a `_poom.nfc` suffix so it does not overwrite the Flipper dump.
+- Requires the card to stay present during the dump.
 
 ### Local emulation
 

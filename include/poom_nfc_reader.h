@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 THE POOM
+
 /* RFAL */
 #include "rfal_nfc.h"
 #include "rfal_t2t.h"
