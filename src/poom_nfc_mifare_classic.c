@@ -6,6 +6,7 @@
 #include "poom_nfc_mifare_test_dict.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_random.h"
@@ -78,7 +79,17 @@ typedef struct
     uint8_t ar[4];
 } poom_mifare_crypto1_session_t;
 
+typedef struct
+{
+    uint8_t* data;
+    uint8_t* valid_bits;
+    uint16_t block_count;
+} poom_mifare_block_cache_t;
+
+static uint16_t poom_mifare_max_block_for_type(nfc_card_type_t card_type);
+
 static poom_mifare_ctx_t s_mf_ctx;
+static poom_mifare_block_cache_t s_block_cache;
 static bool s_crypto1_link_limit = false;
 static bool s_mifare_discover_quiet = false;
 
@@ -94,6 +105,92 @@ static uint8_t s_sector_key_b_valid[(POOM_MIFARE_SECTOR_MAX + 7U) / 8U];
 
 #define POOM_BITSET_SET(arr, idx)   ((arr)[(idx) >> 3] |= (uint8_t)(1u << ((idx) & 7)))
 #define POOM_BITSET_TEST(arr, idx)  ((((arr)[(idx) >> 3]) & (uint8_t)(1u << ((idx) & 7))) != 0U)
+
+static size_t poom_mifare_block_cache_bits_len_(uint16_t block_count)
+{
+    return (size_t)((block_count + 7U) / 8U);
+}
+
+static void poom_mifare_block_cache_release_(void)
+{
+    free(s_block_cache.data);
+    free(s_block_cache.valid_bits);
+    s_block_cache.data = NULL;
+    s_block_cache.valid_bits = NULL;
+    s_block_cache.block_count = 0U;
+}
+
+static bool poom_mifare_block_cache_ensure_(nfc_card_type_t card_type)
+{
+    const uint16_t block_count = (uint16_t)(poom_mifare_max_block_for_type(card_type) + 1U);
+    const size_t bits_len = poom_mifare_block_cache_bits_len_(block_count);
+    uint8_t* data;
+    uint8_t* valid_bits;
+
+    if(block_count == 0U)
+    {
+        return false;
+    }
+    if((s_block_cache.data != NULL) && (s_block_cache.valid_bits != NULL) &&
+       (s_block_cache.block_count == block_count))
+    {
+        return true;
+    }
+
+    poom_mifare_block_cache_release_();
+
+    data = (uint8_t*)calloc((size_t)block_count, 16U);
+    valid_bits = (uint8_t*)calloc(bits_len, 1U);
+    if((data == NULL) || (valid_bits == NULL))
+    {
+        free(data);
+        free(valid_bits);
+        printf("  mifare cache: alloc failed for %u blocks\r\n", (unsigned)block_count);
+        return false;
+    }
+
+    s_block_cache.data = data;
+    s_block_cache.valid_bits = valid_bits;
+    s_block_cache.block_count = block_count;
+    return true;
+}
+
+static bool poom_mifare_block_cache_has_any_(void)
+{
+    if((s_block_cache.valid_bits == NULL) || (s_block_cache.block_count == 0U))
+    {
+        return false;
+    }
+
+    for(size_t i = 0; i < poom_mifare_block_cache_bits_len_(s_block_cache.block_count); i++)
+    {
+        if(s_block_cache.valid_bits[i] != 0U)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool poom_mifare_block_cache_has_all_(uint16_t block_count)
+{
+    if((s_block_cache.valid_bits == NULL) || (block_count == 0U) ||
+       (s_block_cache.block_count < block_count))
+    {
+        return false;
+    }
+
+    for(uint16_t block = 0U; block < block_count; block++)
+    {
+        if(!POOM_BITSET_TEST(s_block_cache.valid_bits, block))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 /* Typical factory/test keys; order is intentional (most common first). */
 #if !POOM_MIFARE_USE_TEST_DICTIONARY
@@ -352,6 +449,10 @@ static const uint8_t* poom_mifare_get_sector_key_ptr_(uint8_t sector, poom_mifar
  */
 static void poom_mifare_block_cache_clear_(void)
 {
+    if((s_block_cache.valid_bits != NULL) && (s_block_cache.block_count != 0U))
+    {
+        memset(s_block_cache.valid_bits, 0, poom_mifare_block_cache_bits_len_(s_block_cache.block_count));
+    }
 }
 
 /**
@@ -363,8 +464,21 @@ static void poom_mifare_block_cache_clear_(void)
  */
 static void poom_mifare_block_cache_store_(uint16_t block, const uint8_t data[16])
 {
-    (void)block;
-    (void)data;
+    if((data == NULL) || !s_mf_ctx.active)
+    {
+        return;
+    }
+    if(!poom_mifare_block_cache_ensure_(s_mf_ctx.card_type))
+    {
+        return;
+    }
+    if(block >= s_block_cache.block_count)
+    {
+        return;
+    }
+
+    memcpy(&s_block_cache.data[(size_t)block * 16U], data, 16U);
+    POOM_BITSET_SET(s_block_cache.valid_bits, block);
 }
 
 /**
@@ -376,9 +490,15 @@ static void poom_mifare_block_cache_store_(uint16_t block, const uint8_t data[16
  */
 static bool poom_mifare_block_cache_load_(uint16_t block, uint8_t out16[16])
 {
-    (void)block;
-    (void)out16;
-    return false;
+    if((out16 == NULL) || (s_block_cache.data == NULL) || (s_block_cache.valid_bits == NULL) ||
+       (block >= s_block_cache.block_count) ||
+       !POOM_BITSET_TEST(s_block_cache.valid_bits, block))
+    {
+        return false;
+    }
+
+    memcpy(out16, &s_block_cache.data[(size_t)block * 16U], 16U);
+    return true;
 }
 
 /**
@@ -1873,6 +1993,7 @@ static bool poom_mifare_classic_auth_internal_(uint8_t block,
 void poom_mifare_classic_init(void)
 {
     memset(&s_mf_ctx, 0, sizeof(s_mf_ctx));
+    poom_mifare_block_cache_release_();
     memset(s_sector_key_a_valid, 0, sizeof(s_sector_key_a_valid));
     memset(s_sector_key_b_valid, 0, sizeof(s_sector_key_b_valid));
     memset(s_sector_key_a, 0, sizeof(s_sector_key_a));
@@ -1903,6 +2024,16 @@ bool poom_mifare_classic_bind_card(const uint8_t* uid,
         return false;
     if(!poom_mifare_classic_is_supported_card(card_type))
         return false;
+
+    poom_mifare_block_cache_clear_();
+    memset(s_sector_key_a_valid, 0, sizeof(s_sector_key_a_valid));
+    memset(s_sector_key_b_valid, 0, sizeof(s_sector_key_b_valid));
+    memset(s_sector_key_a, 0, sizeof(s_sector_key_a));
+    memset(s_sector_key_b, 0, sizeof(s_sector_key_b));
+    memset(s_last_key_a, 0, sizeof(s_last_key_a));
+    memset(s_last_key_b, 0, sizeof(s_last_key_b));
+    s_last_key_a_valid = false;
+    s_last_key_b_valid = false;
 
     s_mf_ctx.active    = true;
     s_mf_ctx.card_type = card_type;
@@ -2779,6 +2910,8 @@ static bool poom_mifare_classic_dump_to_file_(const char* out_dir,
     const char* dir = (out_dir != NULL && out_dir[0] != '\0') ? out_dir : "/nfc";
     uint8_t sectors;
     bool card_present = false;
+    bool cache_has_any = false;
+    bool cache_is_complete = false;
 
     if(out_path != NULL && out_path_len > 0U)
     {
@@ -2816,15 +2949,17 @@ static bool poom_mifare_classic_dump_to_file_(const char* out_dir,
         return false;
     }
 
-    if(card_present)
+    cache_has_any = poom_mifare_block_cache_has_any_();
+    cache_is_complete = poom_mifare_block_cache_has_all_(
+        (uint16_t)(poom_mifare_max_block_for_type(s_mf_ctx.card_type) + 1U));
+
+    if(card_present && !cache_is_complete)
     {
         (void)poom_mifare_classic_discover_default_keys(try_key_b);
-        poom_mifare_block_cache_clear_();
     }
-    else
+    else if(!card_present && !cache_has_any)
     {
-        printf("  mifare dump: card not present; live card required "
-               "(RAM block cache removed).\r\n");
+        printf("  mifare dump: card not present and no cached blocks.\r\n");
         return false;
     }
 
@@ -2874,29 +3009,13 @@ static bool poom_mifare_classic_dump_to_file_(const char* out_dir,
                 continue;
             }
 
-            if(card_present)
+            if(poom_mifare_block_cache_load_((uint8_t)absb, outb))
             {
-                poom_crypto1_state_t st;
-                const uint8_t auth_blk = poom_mifare_auth_target_block(s_mf_ctx.card_type, s);
-                const uint8_t* ka = poom_mifare_get_sector_key_ptr_(s, POOM_MIFARE_KEY_A);
-                const uint8_t* kb = poom_mifare_get_sector_key_ptr_(s, POOM_MIFARE_KEY_B);
-
-                if(ka != NULL &&
-                   poom_mifare_classic_auth_internal_(auth_blk, POOM_MIFARE_KEY_A, ka, true, &st) &&
-                   poom_mifare_crypto_read_block_((uint8_t)absb, &st, outb))
-                {
-                    ok = true;
-                }
-                else if(kb != NULL &&
-                        poom_mifare_classic_auth_internal_(auth_blk, POOM_MIFARE_KEY_B, kb, true, &st) &&
-                        poom_mifare_crypto_read_block_((uint8_t)absb, &st, outb))
-                {
-                    ok = true;
-                }
+                ok = true;
             }
-            else
+            else if(card_present)
             {
-                ok = poom_mifare_block_cache_load_((uint8_t)absb, outb);
+                ok = poom_mifare_classic_read_block((uint8_t)absb, outb);
             }
 
             {

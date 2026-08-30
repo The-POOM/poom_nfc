@@ -27,26 +27,45 @@ This component contains the application-facing NFC logic for:
 
 ```text
 applications/poom_nfc
+├── CMakeLists.txt
 ├── include/
+│   ├── poom_nfc_ats.h
+│   ├── poom_nfc_cards.h
+│   ├── poom_nfc_profile.h
+│   ├── poom_nfc_profile_store.h
 │   ├── poom_nfc_core.h
 │   ├── poom_nfc_reader.h
 │   ├── poom_nfc_card_ident.h
+│   ├── poom_nfc_dump.h
+│   ├── poom_nfc_emv.h
 │   ├── poom_nfc_iso14443_4.h
+│   ├── poom_nfc_iso7816.h
 │   ├── poom_nfc_mifare_classic.h
+│   ├── poom_nfc_mifare_test_dict.h
+│   ├── poom_nfc_store.h
+│   ├── poom_nfc_tlv.h
 │   ├── poom_nfc_tuning.h
 │   ├── poom_nfc_emulator.h
 │   ├── poom_nfc_debug.h
 │   └── poom_nfc_controller.h
+├── README.md
 └── src/
+    ├── poom_nfc_ats.c
     ├── poom_nfc_core.c
     ├── poom_nfc_reader.c
     ├── poom_nfc_card_ident.c
+    ├── poom_nfc_dump.c
+    ├── poom_nfc_emv.c
     ├── poom_nfc_iso14443_4.c
+    ├── poom_nfc_iso7816.c
     ├── poom_nfc_mifare_classic.c
+    ├── poom_nfc_store.c
+    ├── poom_nfc_tlv.c
     ├── poom_nfc_tuning.c
     ├── poom_nfc_emulator.c
     ├── poom_nfc_debug.c
-    └── poom_nfc_controller.c
+    ├── poom_nfc_controller.c
+    └── poom_nfc_profile_store.c
 ```
 
 ## Integration

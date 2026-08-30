@@ -139,19 +139,31 @@ static bool poom_nfc_emv_parse_entry_(const uint8_t* buf,
  * @param[in] cb Parameter passed to the function.
  * @param[in] user_ctx Parameter passed to the function.
  * @param[in,out] io_count Parameter passed to the function.
+ * @param[in,out] stop_requested Parameter passed to the function.
  * @return bool
  */
 static bool poom_nfc_emv_walk_ppse_(const uint8_t* buf,
                                     size_t buf_len,
                                     poom_nfc_emv_app_cb_t cb,
                                     void* user_ctx,
-                                    size_t* io_count)
+                                    size_t* io_count,
+                                    bool* stop_requested)
 {
     size_t off = 0U;
     poom_tlv_view_t tlv;
 
+    if((buf == NULL) || ((buf_len > 0U) && (stop_requested == NULL)))
+    {
+        return false;
+    }
+
     while(poom_tlv_next(buf, buf_len, &off, &tlv))
     {
+        if((stop_requested != NULL) && *stop_requested)
+        {
+            break;
+        }
+
         if(tlv.tag == POOM_EMV_TAG_DIRECTORY_ENTRY)
         {
             poom_nfc_emv_app_t app;
@@ -164,14 +176,19 @@ static bool poom_nfc_emv_walk_ppse_(const uint8_t* buf,
 
                 if(cb != NULL && !cb(&app, user_ctx))
                 {
-                    return false;
+                    if(stop_requested != NULL)
+                    {
+                        *stop_requested = true;
+                    }
+                    break;
                 }
             }
         }
 
         if(tlv.constructed && tlv.value_len > 0U)
         {
-            if(!poom_nfc_emv_walk_ppse_(tlv.value, tlv.value_len, cb, user_ctx, io_count))
+            if(!poom_nfc_emv_walk_ppse_(
+                   tlv.value, tlv.value_len, cb, user_ctx, io_count, stop_requested))
             {
                 return false;
             }
@@ -247,6 +264,7 @@ bool poom_nfc_emv_parse_ppse_apps(const uint8_t* rapdu,
 {
     poom_iso7816_rapdu_view_t view;
     size_t count = 0U;
+    bool stop_requested = false;
 
     if(out_count != NULL)
     {
@@ -258,7 +276,8 @@ bool poom_nfc_emv_parse_ppse_apps(const uint8_t* rapdu,
         return false;
     }
 
-    if(!poom_nfc_emv_walk_ppse_(view.data, view.data_len, cb, user_ctx, &count))
+    if(!poom_nfc_emv_walk_ppse_(
+           view.data, view.data_len, cb, user_ctx, &count, &stop_requested))
     {
         return false;
     }
