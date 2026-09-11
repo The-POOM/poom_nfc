@@ -89,16 +89,21 @@ enum {
 enum {
 	POOM_ISO14443_4_PCB_S_BLOCK_MASK = 0xC0,
 	POOM_ISO14443_4_PCB_S_BLOCK_TAG  = 0xC0,
+	POOM_ISO14443_4_PCB_S_WTX_BASE   = 0xF2,
 };
 
 /* ISO/IEC 14443-4: 7.3 WTX INF mask */
 enum {
 	POOM_ISO14443_4_WTXM_MASK = 0x3F,
+	POOM_ISO14443_4_WTXM_MIN  = 1U,
+	POOM_ISO14443_4_WTXM_MAX  = 59U,
+	POOM_ISO14443_4_WTX_MAX   = 20U,
 };
 
-/* Timeouts: keep original value but name it */
+/* RFAL time values use 1/fc units. dFWT matches RFAL's ISO-DEP poller margin. */
 enum {
-	POOM_RFAL_TXRX_TIMEOUT_TICKS = (216960U + 71680U + 71680U),
+	POOM_RFAL_ACTIVATION_TIMEOUT_TICKS = (216960U + 71680U + 71680U),
+	POOM_RFAL_ISODEP_DFWT_TICKS       = 49152U,
 };
 
 /* ISO/IEC 14443-4: 5.1 RATS parameter byte */
@@ -131,6 +136,7 @@ static uint8_t  poom_rapdu[POOM_NFC_BUF_MAX];
 
 static bool     poom_verbose = true;
 static uint8_t  poom_iso_dep_chunk_len = 16; /* max INF per I-block for our simple fragmentation */
+static uint32_t poom_iso_dep_fwt_ticks;
 static rfalMode poom_mode = RFAL_MODE_NONE;
 static bool     poom_nfca_isodep_active = false;
 
@@ -534,7 +540,32 @@ bool poom_reader_set_iso_dep_chunk_len(uint8_t value_1_to_250)
  * @param[in] verbose true to print TX/RX frames.
  * @return RFAL return code from the transceive operation.
  */
-static ReturnCode poom_nfc_transceive_bytes(bool add_crc, bool verbose)
+static uint32_t poom_iso_dep_timeout_ticks_(uint8_t wtxm)
+{
+	uint64_t timeout;
+	uint32_t fwt = poom_iso_dep_fwt_ticks;
+
+	if(fwt == 0U)
+	{
+		fwt = rfalIsoDepFWI2FWT(RFAL_ISODEP_FWI_DEFAULT);
+	}
+	if(wtxm < POOM_ISO14443_4_WTXM_MIN)
+	{
+		wtxm = POOM_ISO14443_4_WTXM_MIN;
+	}
+
+	timeout = (uint64_t)fwt * (uint64_t)wtxm;
+	if(timeout > RFAL_ISODEP_MAX_FWT)
+	{
+		timeout = RFAL_ISODEP_MAX_FWT;
+	}
+	timeout += POOM_RFAL_ISODEP_DFWT_TICKS;
+	return (uint32_t)timeout;
+}
+
+static ReturnCode poom_nfc_transceive_bytes_timeout_(bool add_crc,
+	                                                   bool verbose,
+	                                                   uint32_t timeout_ticks)
 {
 	uint32_t flags;
 	ReturnCode ret;
@@ -555,7 +586,7 @@ static ReturnCode poom_nfc_transceive_bytes(bool add_crc, bool verbose)
 		POOM_RFAL_RX_MAX,
 		&poom_rx_len,
 		flags,
-		POOM_RFAL_TXRX_TIMEOUT_TICKS
+		timeout_ticks
 	);
 
 	if (verbose) {
@@ -577,6 +608,15 @@ static ReturnCode poom_nfc_transceive_bytes(bool add_crc, bool verbose)
 	}
 
 	return ret;
+}
+
+static ReturnCode poom_nfc_transceive_bytes(bool add_crc, bool verbose)
+{
+	const uint32_t timeout_ticks = poom_nfca_isodep_active
+		? poom_iso_dep_timeout_ticks_(POOM_ISO14443_4_WTXM_MIN)
+		: POOM_RFAL_ACTIVATION_TIMEOUT_TICKS;
+
+	return poom_nfc_transceive_bytes_timeout_(add_crc, verbose, timeout_ticks);
 }
 
 /**
@@ -775,7 +815,7 @@ static void poom_iso_dep_parse_rx_block(uint8_t *data, uint16_t len)
  *
  * @return ReturnCode
  */
-static ReturnCode poom_iso_dep_send_block(void)
+static ReturnCode poom_iso_dep_send_block_timeout_(uint32_t timeout_ticks)
 {
 	poom_tx_len = 0;
 	poom_tx[poom_tx_len++] = poom_blk.pcb;
@@ -792,25 +832,78 @@ static ReturnCode poom_iso_dep_send_block(void)
 		poom_tx_len += poom_blk.inf_len;
 	}
 
-	ReturnCode ret = poom_nfc_transceive_bytes(true, poom_verbose);
-	poom_iso_dep_parse_rx_block(poom_rx, poom_rx_len);
+	ReturnCode ret =
+		poom_nfc_transceive_bytes_timeout_(true, poom_verbose, timeout_ticks);
+	if(ret == ERR_NONE && poom_rx_len > 0U)
+	{
+		poom_iso_dep_parse_rx_block(poom_rx, poom_rx_len);
+	}
+	else
+	{
+		poom_blk.pcb = 0U;
+		poom_blk.inf = NULL;
+		poom_blk.inf_len = 0U;
+	}
 	return ret;
+}
+
+static ReturnCode poom_iso_dep_send_block(void)
+{
+	return poom_iso_dep_send_block_timeout_(
+		poom_iso_dep_timeout_ticks_(POOM_ISO14443_4_WTXM_MIN));
+}
+
+static bool poom_iso_dep_is_wtx_request_(void)
+{
+	const uint8_t pcb_without_cid =
+		(uint8_t)(poom_blk.pcb & (uint8_t)~POOM_ISO14443_4_PCB_HAS_CID);
+
+	return pcb_without_cid == POOM_ISO14443_4_PCB_S_WTX_BASE &&
+	       poom_blk.inf != NULL && poom_blk.inf_len == 1U;
+}
+
+static bool poom_iso_dep_handle_wtx_(void)
+{
+	uint8_t wtx_count = 0U;
+
+	while(poom_iso_dep_is_wtx_request_())
+	{
+		const uint8_t wtxm = (uint8_t)(poom_blk.inf[0] & POOM_ISO14443_4_WTXM_MASK);
+		ReturnCode ret;
+
+		if(wtxm < POOM_ISO14443_4_WTXM_MIN || wtxm > POOM_ISO14443_4_WTXM_MAX ||
+		   wtx_count >= POOM_ISO14443_4_WTX_MAX)
+		{
+			return false;
+		}
+		wtx_count++;
+		poom_iso_dep_prepare_wtx_response(poom_blk.inf);
+		ret = poom_iso_dep_send_block_timeout_(poom_iso_dep_timeout_ticks_(wtxm));
+		if(ret != ERR_NONE)
+		{
+			printf("Error %d\n", ret);
+			return false;
+		}
+	}
+
+	return true;
 }
 
 /**
  * @brief Reset the local ISO-DEP session state to its default values.
  */
-static void poom_iso_dep_session_init(void)
+static void poom_iso_dep_session_init(uint8_t fwi, bool use_cid)
 {
 	poom_iso_dep.max_inf_per_block = poom_iso_dep_chunk_len;
 
-	poom_iso_dep.use_cid = true;
+	poom_iso_dep.use_cid = use_cid;
 	poom_iso_dep.cid = 0;
 
 	poom_iso_dep.use_nad = false;
 	poom_iso_dep.nad = 0;
 
 	poom_iso_dep.i_block_number = 0;
+	poom_iso_dep_fwt_ticks = rfalIsoDepFWI2FWT(fwi);
 }
 
 /* ============================================================================
@@ -846,20 +939,16 @@ static bool poom_iso_dep_exchange_apdu(uint8_t *capdu, uint32_t capdu_len, bool 
 			printf("Error %d\n", ret);
 			return false;
 		}
+		if (!poom_iso_dep_handle_wtx_()) {
+			return false;
+		}
 
 		offset += chunk;
 		remaining -= chunk;
 	}
 
 	if ( (poom_blk.pcb & POOM_ISO14443_4_PCB_S_BLOCK_MASK) == POOM_ISO14443_4_PCB_S_BLOCK_TAG ) {
-		if (poom_blk.inf_len >= 1) {
-			poom_iso_dep_prepare_wtx_response(poom_blk.inf);
-			ret = poom_iso_dep_send_block();
-			if (ret != ERR_NONE) {
-				printf("Error %d\n", ret);
-				return false;
-			}
-		}
+		return false;
 	}
 
 	poom_rapdu_len = 0;
@@ -874,6 +963,9 @@ static bool poom_iso_dep_exchange_apdu(uint8_t *capdu, uint32_t capdu_len, bool 
 		ret = poom_iso_dep_send_block();
 		if (ret != ERR_NONE) {
 			printf("Error %d\n", ret);
+			return false;
+		}
+		if (!poom_iso_dep_handle_wtx_()) {
 			return false;
 		}
 
@@ -956,12 +1048,17 @@ static bool poom_connect_iso14443a(void)
 	poom_tx_len = 2;
 	ret = poom_nfc_transceive_bytes(true, poom_verbose);
 	if (ret == ERR_NONE && poom_rx_len > 0U) {
+		poom_nfc_ats_info_t ats_info;
+		const bool ats_ok =
+			poom_nfc_ats_parse(poom_rx, (uint8_t)poom_rx_len, &ats_info);
+
 		if (poom_verbose) {
 			printf("  [RX] ATS: ");
 			poom_print_hex(poom_rx, poom_rx_len);
 		}
 		poom_nfca_isodep_active = true;
-		poom_iso_dep_session_init();
+		poom_iso_dep_session_init(ats_ok ? ats_info.fwi : RFAL_ISODEP_FWI_DEFAULT,
+		                          ats_ok && ats_info.did_supported);
 
 		uint16_t copy_len = poom_rx_len;
 		if(copy_len > (uint16_t)sizeof(poom_last_profile.ats)) {
@@ -1012,7 +1109,7 @@ static bool poom_connect_iso14443b(void)
 	poom_tx_len = 1 + 4 + 4;
 
 	POOM_RETURN_FALSE_ON_ERR(ret, poom_nfc_transceive_bytes(true, poom_verbose));
-	poom_iso_dep_session_init();
+	poom_iso_dep_session_init(RFAL_ISODEP_FWI_DEFAULT, true);
 	return true;
 }
 
