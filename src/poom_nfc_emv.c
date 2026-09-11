@@ -2030,7 +2030,7 @@ bool poom_nfc_emv_read_card(poom_nfc_emv_card_t* out_card)
     static const uint8_t fallback_aids[][7] = {
         {0xA0U, 0x00U, 0x00U, 0x00U, 0x03U, 0x10U, 0x10U}, /* Visa. */
         {0xA0U, 0x00U, 0x00U, 0x00U, 0x04U, 0x10U, 0x10U}, /* Mastercard. */
-        {0xA0U, 0x00U, 0x00U, 0x00U, 0x04U, 0x30U, 0x60U}, 
+        {0xA0U, 0x00U, 0x00U, 0x00U, 0x04U, 0x30U, 0x60U}, /* Maestro. */
     };
     size_t response_len = 0U;
     size_t app_count = 0U;
@@ -2256,20 +2256,20 @@ static const char* poom_nfc_emv_dol_tag_name_(uint32_t tag)
 {
     switch(tag)
     {
-        case 0x9F02U: return "Amount";
-        case 0x9F03U: return "Other amount";
+        case 0x9F02U: return "Amt";
+        case 0x9F03U: return "Other";
         case 0x9F1AU: return "Country";
         case 0x95U: return "TVR";
         case 0x5F2AU: return "Currency";
         case 0x9AU: return "Date";
         case 0x9CU: return "Type";
-        case 0x9F37U: return "Unpredictable no.";
-        case 0x9F35U: return "Terminal type";
+        case 0x9F37U: return "UN";
+        case 0x9F35U: return "Term type";
         case 0x9F34U: return "CVM result";
-        case 0x9F45U: return "Data auth code";
-        case 0x9F4CU: return "ICC dynamic no.";
+        case 0x9F45U: return "Auth code";
+        case 0x9F4CU: return "ICC dyn no";
         case 0x9F21U: return "Time";
-        case 0x9F7CU: return "Customer data";
+        case 0x9F7CU: return "Customer";
         default: return NULL;
     }
 }
