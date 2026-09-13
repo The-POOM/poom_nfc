@@ -28,6 +28,34 @@ typedef enum
     POOM_MIFARE_AUTH_STATUS_FULL,
 } poom_mifare_auth_status_t;
 
+typedef enum
+{
+    POOM_MIFARE_RESTORE_OK = 0,
+    POOM_MIFARE_RESTORE_PARTIAL,
+    POOM_MIFARE_RESTORE_INVALID_FILE,
+    POOM_MIFARE_RESTORE_SIZE_MISMATCH,
+    POOM_MIFARE_RESTORE_NO_CARD,
+    POOM_MIFARE_RESTORE_NO_MEMORY,
+} poom_mifare_restore_status_t;
+
+typedef struct
+{
+    uint16_t source_blocks;
+    uint16_t compared;
+    uint16_t unchanged;
+    uint16_t written;
+    uint16_t verified;
+    uint16_t skipped;
+    uint16_t failed;
+    uint16_t trailers_written;
+    bool block0_different;
+} poom_mifare_restore_result_t;
+
+typedef void (*poom_mifare_restore_progress_cb_t)(uint16_t completed,
+                                                   uint16_t total,
+                                                   uint8_t block,
+                                                   void* user_ctx);
+
 /* Initialize/reset local Classic/Mini session context. */
 void poom_mifare_classic_init(void);
 void poom_mifare_classic_reset(void);
@@ -59,6 +87,28 @@ bool poom_mifare_classic_auth(uint8_t block,
                               const uint8_t key[6]);
 bool poom_mifare_classic_read_block(uint8_t block, uint8_t out_data[16]);
 bool poom_mifare_classic_write_block(uint8_t block, const uint8_t data[16]);
+
+/**
+ * @brief Restore a Classic dump by writing only blocks that differ.
+ *
+ * Block 0 is compared but never written. Data blocks are processed first.
+ * Sector trailers are optional and, when enabled, are written last after all
+ * ordinary data has been verified.
+ *
+ * @param[in] rel_path Dump path relative to the SD root (for example
+ *            `/nfc/Classic1K_x.nfc`).
+ * @param[in] write_trailers Also restore sector keys/access bits.
+ * @param[out] out_result Operation counters.
+ * @param[in] progress_cb Optional progress callback.
+ * @param[in] user_ctx Value passed to progress_cb.
+ * @return Detailed restore status.
+ */
+poom_mifare_restore_status_t poom_mifare_classic_restore_file(
+    const char* rel_path,
+    bool write_trailers,
+    poom_mifare_restore_result_t* out_result,
+    poom_mifare_restore_progress_cb_t progress_cb,
+    void* user_ctx);
 
 /* Capability helper for CLI/runtime checks (true for current auth phase). */
 poom_mifare_auth_status_t poom_mifare_classic_get_last_auth_status(void);

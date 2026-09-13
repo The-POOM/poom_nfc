@@ -2,6 +2,8 @@ set(srcs
          "src/poom_nfc_ats.c"
          "src/poom_nfc_card_ident.c"
          "src/poom_nfc_emulator.c"
+         "src/poom_nfc_emulator_mful.c"
+         "src/poom_nfc_emulator_t4t.c"
          "src/poom_nfc_emv.c"
          "src/poom_nfc_dump.c"
          "src/poom_nfc_iso7816.c"

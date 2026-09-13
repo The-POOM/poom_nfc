@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_random.h"
 #include "esp_system.h"
 #include "sd_card.h"
@@ -2501,6 +2502,402 @@ static bool poom_mifare_try_discover_pass_(bool try_key_b,
     return matched;
 }
 
+typedef struct
+{
+    uint8_t blocks[POOM_MIFARE_BLOCK_MAX][16];
+    uint16_t byte_known[POOM_MIFARE_BLOCK_MAX];
+    uint8_t keys[POOM_MIFARE_SECTOR_MAX][2][POOM_MIFARE_KEY_SIZE];
+    uint8_t key_known[POOM_MIFARE_SECTOR_MAX];
+    uint16_t block_count;
+    uint16_t highest_block;
+    bool has_block;
+    bool classic_marker;
+} poom_mifare_restore_image_t;
+
+static int poom_mifare_restore_hex_nibble_(char c)
+{
+    if(c >= '0' && c <= '9') return c - '0';
+    if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static const char* poom_mifare_restore_skip_space_(const char* text)
+{
+    while(text != NULL && (*text == ' ' || *text == '\t')) text++;
+    return text;
+}
+
+static bool poom_mifare_restore_parse_key_(const char* text,
+                                            uint8_t key[POOM_MIFARE_KEY_SIZE])
+{
+    size_t count = 0U;
+    int high = -1;
+
+    if(text == NULL || key == NULL || strstr(text, "Unknown") != NULL)
+    {
+        return false;
+    }
+
+    for(; *text != '\0' && *text != '\r' && *text != '\n'; text++)
+    {
+        const int nibble = poom_mifare_restore_hex_nibble_(*text);
+        if(nibble < 0)
+        {
+            if(*text == ' ' || *text == '\t') continue;
+            return false;
+        }
+        if(high < 0)
+        {
+            high = nibble;
+        }
+        else
+        {
+            if(count >= POOM_MIFARE_KEY_SIZE) return false;
+            key[count++] = (uint8_t)((high << 4) | nibble);
+            high = -1;
+        }
+    }
+    return count == POOM_MIFARE_KEY_SIZE && high < 0;
+}
+
+static void poom_mifare_restore_parse_block_(poom_mifare_restore_image_t* image,
+                                              const char* line)
+{
+    unsigned int block = 0U;
+    const char* text;
+    uint16_t mask = 0U;
+
+    if(image == NULL || line == NULL || sscanf(line, "Block %u:", &block) != 1 ||
+       block >= POOM_MIFARE_BLOCK_MAX)
+    {
+        return;
+    }
+    text = strchr(line, ':');
+    if(text == NULL) return;
+    text++;
+
+    for(uint8_t i = 0U; i < 16U; i++)
+    {
+        int high;
+        int low;
+        text = poom_mifare_restore_skip_space_(text);
+        if(text == NULL || *text == '\0' || *text == '\r' || *text == '\n') break;
+        if(text[0] == '?' && text[1] == '?')
+        {
+            text += 2;
+            continue;
+        }
+        high = poom_mifare_restore_hex_nibble_(text[0]);
+        low = poom_mifare_restore_hex_nibble_(text[1]);
+        if(high < 0 || low < 0) break;
+        image->blocks[block][i] = (uint8_t)((high << 4) | low);
+        mask |= (uint16_t)(1U << i);
+        text += 2;
+    }
+
+    image->byte_known[block] = mask;
+    image->has_block = true;
+    if(block > image->highest_block) image->highest_block = (uint16_t)block;
+}
+
+static uint8_t poom_mifare_restore_sector_count_(uint16_t block_count)
+{
+    if(block_count == 20U) return 5U;
+    if(block_count == 64U) return 16U;
+    if(block_count == 256U) return 40U;
+    return 0U;
+}
+
+static uint16_t poom_mifare_restore_trailer_(uint8_t sector)
+{
+    if(sector < 32U) return (uint16_t)((uint16_t)sector * 4U + 3U);
+    return (uint16_t)(128U + ((uint16_t)sector - 32U) * 16U + 15U);
+}
+
+static bool poom_mifare_restore_is_trailer_(uint16_t block)
+{
+    if(block < 128U) return (block & 3U) == 3U;
+    return ((block - 128U) & 15U) == 15U;
+}
+
+static bool poom_mifare_restore_access_valid_(const uint8_t trailer[16])
+{
+    const uint8_t b6 = trailer[6];
+    const uint8_t b7 = trailer[7];
+    const uint8_t b8 = trailer[8];
+    return ((b6 & 0x0FU) == ((~(b7 >> 4U)) & 0x0FU)) &&
+           ((b7 & 0x0FU) == ((~(b8 >> 4U)) & 0x0FU)) &&
+           ((b8 & 0x0FU) == ((~(b6 >> 4U)) & 0x0FU));
+}
+
+static bool poom_mifare_restore_load_(const char* rel_path,
+                                      poom_mifare_restore_image_t* image)
+{
+    char abs_path[192];
+    char line[196];
+    FILE* file;
+    unsigned int declared_blocks = 0U;
+
+    if(rel_path == NULL || image == NULL) return false;
+    if(sd_card_is_not_mounted() && sd_card_mount() != ESP_OK) return false;
+    if(rel_path[0] == '/')
+        (void)snprintf(abs_path, sizeof(abs_path), "%s%s", SD_CARD_PATH, rel_path);
+    else
+        (void)snprintf(abs_path, sizeof(abs_path), "%s/%s", SD_CARD_PATH, rel_path);
+
+    file = fopen(abs_path, "r");
+    if(file == NULL) return false;
+    while(fgets(line, sizeof(line), file) != NULL)
+    {
+        const char* text = poom_mifare_restore_skip_space_(line);
+        unsigned int sector = 0U;
+        char key_type = '\0';
+        int value_offset = 0;
+
+        if(strstr(text, "Device type: Mifare Classic") != NULL)
+        {
+            image->classic_marker = true;
+        }
+        if(sscanf(text, "Block count: %u", &declared_blocks) == 1)
+        {
+            continue;
+        }
+        if(strncmp(text, "Block ", 6U) == 0)
+        {
+            poom_mifare_restore_parse_block_(image, text);
+            continue;
+        }
+        if(sscanf(text, "Sector %u Key %c:%n", &sector, &key_type, &value_offset) == 2 &&
+           sector < POOM_MIFARE_SECTOR_MAX && value_offset > 0)
+        {
+            const uint8_t key_idx = (key_type == 'B' || key_type == 'b') ? 1U : 0U;
+            if((key_type == 'A' || key_type == 'a' || key_type == 'B' || key_type == 'b') &&
+               poom_mifare_restore_parse_key_(&text[value_offset], image->keys[sector][key_idx]))
+            {
+                image->key_known[sector] |= (uint8_t)(1U << key_idx);
+            }
+        }
+    }
+    (void)fclose(file);
+
+    if(!image->classic_marker || !image->has_block) return false;
+    image->block_count = (declared_blocks > 0U) ? (uint16_t)declared_blocks
+                                                : (uint16_t)(image->highest_block + 1U);
+    if(poom_mifare_restore_sector_count_(image->block_count) == 0U ||
+       image->highest_block >= image->block_count)
+    {
+        return false;
+    }
+
+    const uint8_t sectors = poom_mifare_restore_sector_count_(image->block_count);
+    for(uint8_t sector = 0U; sector < sectors; sector++)
+    {
+        const uint16_t trailer = poom_mifare_restore_trailer_(sector);
+        if(image->byte_known[trailer] == 0xFFFFU)
+        {
+            if((image->key_known[sector] & 0x01U) == 0U)
+            {
+                memcpy(image->keys[sector][0], &image->blocks[trailer][0], POOM_MIFARE_KEY_SIZE);
+                image->key_known[sector] |= 0x01U;
+            }
+            if((image->key_known[sector] & 0x02U) == 0U)
+            {
+                memcpy(image->keys[sector][1], &image->blocks[trailer][10], POOM_MIFARE_KEY_SIZE);
+                image->key_known[sector] |= 0x02U;
+            }
+        }
+        if((image->key_known[sector] & 0x01U) != 0U)
+        {
+            memcpy(&image->blocks[trailer][0], image->keys[sector][0], POOM_MIFARE_KEY_SIZE);
+            image->byte_known[trailer] |= 0x003FU;
+        }
+        if((image->key_known[sector] & 0x02U) != 0U)
+        {
+            memcpy(&image->blocks[trailer][10], image->keys[sector][1], POOM_MIFARE_KEY_SIZE);
+            image->byte_known[trailer] |= 0xFC00U;
+        }
+    }
+    return true;
+}
+
+static void poom_mifare_restore_progress_(poom_mifare_restore_progress_cb_t cb,
+                                           void* user_ctx,
+                                           uint16_t* completed,
+                                           uint16_t total,
+                                           uint16_t block)
+{
+    (*completed)++;
+    if(cb != NULL) cb(*completed, total, (uint8_t)block, user_ctx);
+}
+
+poom_mifare_restore_status_t poom_mifare_classic_restore_file(
+    const char* rel_path,
+    bool write_trailers,
+    poom_mifare_restore_result_t* out_result,
+    poom_mifare_restore_progress_cb_t progress_cb,
+    void* user_ctx)
+{
+    poom_mifare_restore_image_t* image;
+    poom_mifare_restore_result_t result = {0};
+    uint16_t completed = 0U;
+    uint16_t progress_total = 0U;
+    uint16_t target_blocks;
+    uint8_t sectors;
+
+    if(out_result != NULL) memset(out_result, 0, sizeof(*out_result));
+    if(!poom_mifare_classic_has_card()) return POOM_MIFARE_RESTORE_NO_CARD;
+
+    image = (poom_mifare_restore_image_t*)heap_caps_calloc(
+        1U, sizeof(*image), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(image == NULL) return POOM_MIFARE_RESTORE_NO_MEMORY;
+    if(!poom_mifare_restore_load_(rel_path, image))
+    {
+        heap_caps_free(image);
+        return POOM_MIFARE_RESTORE_INVALID_FILE;
+    }
+
+    result.source_blocks = image->block_count;
+    target_blocks = (uint16_t)(poom_mifare_classic_get_max_block() + 1U);
+    if(target_blocks != image->block_count)
+    {
+        if(out_result != NULL) *out_result = result;
+        heap_caps_free(image);
+        return POOM_MIFARE_RESTORE_SIZE_MISMATCH;
+    }
+    sectors = poom_mifare_restore_sector_count_(target_blocks);
+
+    /* Try source keys first (useful when restoring the original card), then
+     * discover default keys used by blank/test cards. */
+    for(uint8_t sector = 0U; sector < sectors; sector++)
+    {
+        const uint8_t auth_block = (uint8_t)poom_mifare_first_block_of_sector(
+            s_mf_ctx.card_type, sector);
+        if((image->key_known[sector] & 0x01U) != 0U)
+            (void)poom_mifare_classic_auth(auth_block, POOM_MIFARE_KEY_A, image->keys[sector][0]);
+        if((image->key_known[sector] & 0x02U) != 0U)
+            (void)poom_mifare_classic_auth(auth_block, POOM_MIFARE_KEY_B, image->keys[sector][1]);
+    }
+    (void)poom_mifare_classic_discover_default_keys(true);
+
+    for(uint16_t block = 0U; block < target_blocks; block++)
+    {
+        if(!poom_mifare_restore_is_trailer_(block) || write_trailers) progress_total++;
+    }
+
+    /* Ordinary data always comes first so a key/access change cannot prevent
+     * restoration of later data in the same sector. */
+    for(uint16_t block = 0U; block < target_blocks; block++)
+    {
+        uint8_t current[16];
+        uint8_t verify[16];
+        if(poom_mifare_restore_is_trailer_(block)) continue;
+        if(image->byte_known[block] != 0xFFFFU)
+        {
+            result.skipped++;
+            poom_mifare_restore_progress_(progress_cb, user_ctx, &completed, progress_total, block);
+            continue;
+        }
+        if(!poom_mifare_classic_read_block((uint8_t)block, current))
+        {
+            result.failed++;
+            poom_mifare_restore_progress_(progress_cb, user_ctx, &completed, progress_total, block);
+            continue;
+        }
+        result.compared++;
+        if(memcmp(current, image->blocks[block], sizeof(current)) == 0)
+        {
+            result.unchanged++;
+        }
+        else if(block == 0U)
+        {
+            result.block0_different = true;
+            result.skipped++;
+        }
+        else if(!poom_mifare_classic_write_block((uint8_t)block, image->blocks[block]))
+        {
+            result.failed++;
+        }
+        else
+        {
+            result.written++;
+            if(poom_mifare_classic_read_block((uint8_t)block, verify) &&
+               memcmp(verify, image->blocks[block], sizeof(verify)) == 0)
+                result.verified++;
+            else
+                result.failed++;
+        }
+        poom_mifare_restore_progress_(progress_cb, user_ctx, &completed, progress_total, block);
+    }
+
+    if(write_trailers)
+    {
+        for(uint8_t sector = 0U; sector < sectors; sector++)
+        {
+            const uint16_t block = poom_mifare_restore_trailer_(sector);
+            uint8_t current[16];
+            uint8_t verify[16];
+            uint8_t current_key[POOM_MIFARE_KEY_SIZE];
+            bool keys_equal = true;
+            bool auth_ok = false;
+
+            if(image->byte_known[block] != 0xFFFFU ||
+               !poom_mifare_restore_access_valid_(image->blocks[block]))
+            {
+                result.skipped++;
+                poom_mifare_restore_progress_(progress_cb, user_ctx, &completed, progress_total, block);
+                continue;
+            }
+            if(!poom_mifare_classic_read_block((uint8_t)block, current))
+            {
+                result.failed++;
+                poom_mifare_restore_progress_(progress_cb, user_ctx, &completed, progress_total, block);
+                continue;
+            }
+            result.compared++;
+            for(uint8_t key_idx = 0U; key_idx < 2U; key_idx++)
+            {
+                const poom_mifare_key_type_t type =
+                    (key_idx == 0U) ? POOM_MIFARE_KEY_A : POOM_MIFARE_KEY_B;
+                if(!poom_mifare_classic_get_sector_key(sector, type, current_key) ||
+                   memcmp(current_key, image->keys[sector][key_idx], POOM_MIFARE_KEY_SIZE) != 0)
+                    keys_equal = false;
+            }
+            if(keys_equal && memcmp(&current[6], &image->blocks[block][6], 4U) == 0)
+            {
+                result.unchanged++;
+                poom_mifare_restore_progress_(progress_cb, user_ctx, &completed, progress_total, block);
+                continue;
+            }
+            if(!poom_mifare_classic_write_block((uint8_t)block, image->blocks[block]))
+            {
+                result.failed++;
+                poom_mifare_restore_progress_(progress_cb, user_ctx, &completed, progress_total, block);
+                continue;
+            }
+            result.written++;
+            result.trailers_written++;
+            poom_mifare_cache_record_sector_key_(sector, POOM_MIFARE_KEY_A, image->keys[sector][0]);
+            poom_mifare_cache_record_sector_key_(sector, POOM_MIFARE_KEY_B, image->keys[sector][1]);
+            auth_ok = poom_mifare_classic_auth((uint8_t)block, POOM_MIFARE_KEY_A,
+                                                image->keys[sector][0]);
+            if(!auth_ok)
+                auth_ok = poom_mifare_classic_auth((uint8_t)block, POOM_MIFARE_KEY_B,
+                                                    image->keys[sector][1]);
+            if(auth_ok && poom_mifare_classic_read_block((uint8_t)block, verify) &&
+               memcmp(&verify[6], &image->blocks[block][6], 4U) == 0)
+                result.verified++;
+            else
+                result.failed++;
+            poom_mifare_restore_progress_(progress_cb, user_ctx, &completed, progress_total, block);
+        }
+    }
+
+    if(out_result != NULL) *out_result = result;
+    heap_caps_free(image);
+    return (result.failed == 0U) ? POOM_MIFARE_RESTORE_OK : POOM_MIFARE_RESTORE_PARTIAL;
+}
+
 bool poom_mifare_classic_discover_default_keys(bool try_key_b)
 {
     bool found_any = false;
@@ -2808,8 +3205,8 @@ static bool poom_mifare_write_dump_header_(const char* path,
                        poom_mifare_flipper_type_label_(s_mf_ctx.card_type),
                        (s_mf_ctx.uid_len > 0U) ? " " : "",
                        (s_mf_ctx.uid_len > 0U) ? uid_hdr : "",
-                       (unsigned)((s_mf_ctx.atqa >> 8) & 0xFFU),
                        (unsigned)(s_mf_ctx.atqa & 0xFFU),
+                       (unsigned)((s_mf_ctx.atqa >> 8) & 0xFFU),
                        (unsigned)s_mf_ctx.sak,
                        (unsigned)sectors,
                        (unsigned)block_count);
@@ -2828,8 +3225,8 @@ static bool poom_mifare_write_dump_header_(const char* path,
                        "Data format version: 2\n",
                        (s_mf_ctx.uid_len > 0U) ? " " : "",
                        (s_mf_ctx.uid_len > 0U) ? uid_hdr : "",
-                       (unsigned)((s_mf_ctx.atqa >> 8) & 0xFFU),
                        (unsigned)(s_mf_ctx.atqa & 0xFFU),
+                       (unsigned)((s_mf_ctx.atqa >> 8) & 0xFFU),
                        (unsigned)s_mf_ctx.sak,
                        poom_mifare_flipper_type_label_(s_mf_ctx.card_type));
     }

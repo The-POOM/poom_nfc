@@ -34,7 +34,7 @@ typedef struct
     char uri[128];     /* used by T4T URI payload builder */
     bool uri_set;
 
-    char image_path[128]; /* optional MFUL image path:
+    char image_path[128]; /* optional MFUL dump path:
                            * Flipper .nfc (NTAG213/215) supported
                            * 64 legacy
                            * 180 NTAG213 data-only, 212 NTAG213+signature

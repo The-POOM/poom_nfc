@@ -765,8 +765,8 @@ esp_err_t poom_nfc_dump_load_card_id_from_sd(const char *rel_path, poom_nfc_card
     bool uid_set = false;
 
     bool atqa_set = false;
-    uint8_t atqa1 = 0U;
     uint8_t atqa0 = 0U;
+    uint8_t atqa1 = 0U;
 
     bool sak_set = false;
     uint8_t sak = 0U;
@@ -820,7 +820,7 @@ esp_err_t poom_nfc_dump_load_card_id_from_sd(const char *rel_path, poom_nfc_card
             continue;
         }
 
-        if(sscanf(line, "ATQA: %hhx %hhx", &atqa1, &atqa0) == 2)
+        if(sscanf(line, "ATQA: %hhx %hhx", &atqa0, &atqa1) == 2)
         {
             atqa_set = true;
             continue;
@@ -860,8 +860,18 @@ esp_err_t poom_nfc_dump_load_card_id_from_sd(const char *rel_path, poom_nfc_card
 
     if(atqa_set)
     {
-        out_id->atqa[1] = atqa1;
-        out_id->atqa[0] = atqa0;
+        /* Files normally use the NFC-A radio byte order (04 00, 44 00,
+         * etc.). Accept old POOM Classic dumps that wrote it reversed. */
+        if(atqa0 == 0U && atqa1 != 0U)
+        {
+            out_id->atqa[0] = atqa1;
+            out_id->atqa[1] = atqa0;
+        }
+        else
+        {
+            out_id->atqa[0] = atqa0;
+            out_id->atqa[1] = atqa1;
+        }
         out_id->flags |= POOM_NFC_CARD_FLAG_ATQA_SET;
     }
 

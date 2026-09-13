@@ -121,6 +121,8 @@ The component is registered by `applications/poom_nfc/CMakeLists.txt` and curren
 - `bool poom_nfc_emv_select_ppse(...)`
 - `bool poom_nfc_emv_select_aid(...)`
 - `bool poom_nfc_emv_parse_ppse_apps(...)`
+- `bool poom_nfc_emv_read_application(...)`
+- `bool poom_nfc_emv_read_card(...)`
 
 ### MIFARE Classic
 
@@ -330,6 +332,7 @@ nfc-core-start
 nfc-card-connect
 nfc-emv-discover
 nfc-emv-select A0000000041010
+nfc-emv-read
 ```
 
 **`nfc-emv-discover`**
@@ -344,6 +347,37 @@ nfc-emv-select A0000000041010
 - Selects one EMV application by AID.
 - AID is passed as hex, for example `A0000000041010`.
 - Prints the returned status words and, in verbose reader mode, a decoded TLV view.
+
+**`nfc-emv-read`**
+
+- Selects the highest-priority application advertised by PPSE.
+- Sends GPO with the requested PDOL and follows the returned AFL.
+- Decodes contactless card data returned directly inside GPO; an AFL is not
+  required when the application supplies its readable data inline.
+- Uses the ATS FWI to calculate the ISO-DEP frame waiting time and supports
+  repeated S(WTX) waiting-time extensions.
+- Reads Track 1/Track 2 and available application records, and decodes PAN,
+  cardholder, expiration, service code, PAN sequence, country/currency, AIP,
+  PIN try counter, ATC, IAD, application cryptogram/CID, program identifier,
+  offline amount, CTQ, and form-factor indicator when supplied by the card.
+- Infers Visa or Mastercard from the AID RID and labels the expected contactless
+  kernel family as a hint, not as proof of the kernel negotiated by a terminal.
+- Keeps common EMV decoding separate from scheme-specific semantics: Visa uses
+  `9F5D`/`9F6C`/`9F6E` as AOSA/CTQ/FFI, while Mastercard stores these as
+  application-capability, profile-specific, and Third Party Data objects.
+- Decodes Language Preference, Application Version, AUC, CVM List, CDOL1/CDOL2,
+  issuer action codes, SDA/DDOL and public-key metadata. Large certificates stay
+  in the raw R-APDU transcript; only their presence and length use decoded RAM.
+- Reads the optional transaction log when the card advertises one.
+- Optional or issuer-protected fields may be absent without making discovery fail.
+- Reports a specific result such as `complete`, `gpo-timeout`, `gpo-rejected`,
+  `gpo-invalid`, `afl-invalid`, or `link-lost`.
+- Keeps an exact-size dynamic APDU transcript so unknown/proprietary TLVs are not
+  lost. The Zen save action writes it with UID, ATQA, SAK, ATS and decoded EMV
+  fields to the `.nfc` file; file loading is not implemented.
+- The default terminal context is United States (`0840`) and USD (`0840`); override
+  `POOM_NFC_EMV_TERMINAL_COUNTRY_CODE_BCD` and
+  `POOM_NFC_EMV_TRANSACTION_CURRENCY_CODE_BCD` at build time for another locale.
 
 ### MIFARE Classic
 
