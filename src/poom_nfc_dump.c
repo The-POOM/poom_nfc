@@ -14,7 +14,7 @@
 #include "poom_nfc_card_ident.h"
 #include "sd_card.h"
 
-#define POOM_NFC_DUMP_DIR "/nfc_dumps"
+#define POOM_NFC_DUMP_DIR "/nfc"
 
 poom_nfc_t2t_product_t poom_nfc_dump_guess_t2t_product(const poom_nfc_dump_t *dump)
 {
@@ -22,11 +22,6 @@ poom_nfc_t2t_product_t poom_nfc_dump_guess_t2t_product(const poom_nfc_dump_t *du
     {
         return POOM_NFC_T2T_PRODUCT_UNKNOWN;
     }
-    if(dump->read_mode != POOM_NFC_DUMP_READ_FULL)
-    {
-        return POOM_NFC_T2T_PRODUCT_UNKNOWN;
-    }
-
     if(dump->has_version_bytes)
     {
         const uint8_t *v = dump->version_bytes;
@@ -434,9 +429,10 @@ static const char *poom_nfc_dump_mful_type_(const poom_nfc_dump_t *dump)
  * @param[in] out_rel_path_len Parameter passed to the function.
  * @return esp_err_t
  */
-static esp_err_t poom_nfc_dump_save_mful_flipper_to_sd_(const poom_nfc_dump_t *dump,
-                                                       char *out_rel_path,
-                                                       size_t out_rel_path_len)
+static esp_err_t poom_nfc_dump_save_mful_flipper_to_path_(const poom_nfc_dump_t *dump,
+                                                          const char *requested_rel_path,
+                                                          char *out_rel_path,
+                                                          size_t out_rel_path_len)
 {
     esp_err_t err;
     char rel_path_local[128];
@@ -464,10 +460,21 @@ static esp_err_t poom_nfc_dump_save_mful_flipper_to_sd_(const poom_nfc_dump_t *d
         return err;
     }
 
-    err = poom_nfc_dump_build_unique_rel_path_(dump, rel_path_local, sizeof(rel_path_local));
-    if(err != ESP_OK)
+    if(requested_rel_path != NULL)
     {
-        return err;
+        const int written = snprintf(rel_path_local, sizeof(rel_path_local), "%s", requested_rel_path);
+        if((written < 0) || ((size_t)written >= sizeof(rel_path_local)))
+        {
+            return ESP_ERR_INVALID_SIZE;
+        }
+    }
+    else
+    {
+        err = poom_nfc_dump_build_unique_rel_path_(dump, rel_path_local, sizeof(rel_path_local));
+        if(err != ESP_OK)
+        {
+            return err;
+        }
     }
 
     if((out_rel_path != NULL) && (out_rel_path_len > 0U))
@@ -597,7 +604,99 @@ esp_err_t poom_nfc_dump_save_mful_bin_to_sd(const poom_nfc_dump_t *dump,
         return ESP_ERR_INVALID_STATE;
     }
 
-    return poom_nfc_dump_save_mful_flipper_to_sd_(dump, out_rel_path, out_rel_path_len);
+    return poom_nfc_dump_save_mful_flipper_to_path_(dump, NULL, out_rel_path, out_rel_path_len);
+}
+
+esp_err_t poom_nfc_dump_save_mful_named_to_sd(const poom_nfc_dump_t *dump,
+                                               const char *rel_dir,
+                                               const char *name,
+                                               char *out_rel_path,
+                                               size_t out_rel_path_len)
+{
+    char safe_name[65];
+    char rel_path[160];
+    char abs_path[192];
+    size_t safe_len = 0U;
+
+    if((dump == NULL) || (rel_dir == NULL) || (name == NULL) ||
+       (rel_dir[0] != '/') || (strstr(rel_dir, "..") != NULL))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if(!poom_nfc_dump_is_mful_full_(dump))
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    for(size_t i = 0U; (name[i] != '\0') && (safe_len < (sizeof(safe_name) - 1U)); i++)
+    {
+        const unsigned char ch = (unsigned char)name[i];
+        if(isalnum(ch) || (ch == '-') || (ch == '_'))
+        {
+            safe_name[safe_len++] = (char)ch;
+        }
+        else if((ch == ' ') || (ch == '.'))
+        {
+            if((safe_len > 0U) && (safe_name[safe_len - 1U] != '_'))
+            {
+                safe_name[safe_len++] = '_';
+            }
+        }
+    }
+    while((safe_len > 0U) && (safe_name[safe_len - 1U] == '_'))
+    {
+        safe_len--;
+    }
+    if(safe_len == 0U)
+    {
+        (void)snprintf(safe_name, sizeof(safe_name), "Amiibo");
+    }
+    else
+    {
+        safe_name[safe_len] = '\0';
+    }
+
+    if(sd_card_is_not_mounted())
+    {
+        sd_card_begin();
+        const esp_err_t mount_err = sd_card_mount();
+        if(mount_err != ESP_OK)
+        {
+            return mount_err;
+        }
+    }
+    esp_err_t err = sd_card_create_dir(POOM_NFC_DUMP_DIR);
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+    err = sd_card_create_dir(rel_dir);
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+
+    for(unsigned suffix = 0U; suffix < 1000U; suffix++)
+    {
+        const int written = (suffix == 0U) ?
+            snprintf(rel_path, sizeof(rel_path), "%s/%s.nfc", rel_dir, safe_name) :
+            snprintf(rel_path, sizeof(rel_path), "%s/%s_%u.nfc", rel_dir, safe_name, suffix);
+        if((written < 0) || ((size_t)written >= sizeof(rel_path)))
+        {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        err = poom_nfc_dump_build_abs_path_(rel_path, abs_path, sizeof(abs_path));
+        if(err != ESP_OK)
+        {
+            return err;
+        }
+        if(!poom_nfc_dump_path_exists_(abs_path))
+        {
+            return poom_nfc_dump_save_mful_flipper_to_path_(
+                dump, rel_path, out_rel_path, out_rel_path_len);
+        }
+    }
+    return ESP_FAIL;
 }
 
 esp_err_t poom_nfc_dump_save_to_sd(const poom_nfc_dump_t *dump, char *out_rel_path, size_t out_rel_path_len)

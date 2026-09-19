@@ -219,6 +219,11 @@ bool poom_nfc_controller_scan_found_cards(uint32_t timeout_ms,
 
 bool poom_nfc_controller_capture_dump(uint32_t timeout_ms, poom_nfc_dump_t *out_dump)
 {
+    return poom_nfc_controller_capture_dump_cancelable(timeout_ms, out_dump, NULL, NULL);
+}
+
+bool poom_nfc_controller_capture_probe(uint32_t timeout_ms, poom_nfc_dump_t *out_dump)
+{
     rfalNfcDevice *active = NULL;
 
     if(out_dump == NULL)
@@ -239,7 +244,44 @@ bool poom_nfc_controller_capture_dump(uint32_t timeout_ms, poom_nfc_dump_t *out_
     }
 
     (void)memset(out_dump, 0, sizeof(*out_dump));
-    const bool ok = poom_nfc_reader_create_dump(active, out_dump);
+    const bool ok = poom_nfc_reader_create_probe(active, out_dump);
+
+    rfalNfcDeactivate(RFAL_NFC_DEACTIVATE_IDLE);
+    rfalFieldOff();
+
+    return ok;
+}
+
+bool poom_nfc_controller_capture_dump_cancelable(
+    uint32_t timeout_ms,
+    poom_nfc_dump_t *out_dump,
+    poom_nfc_cancel_cb_t cancel_cb,
+    void *user_ctx)
+{
+    rfalNfcDevice *active = NULL;
+
+    if(out_dump == NULL)
+    {
+        return false;
+    }
+
+    if(!poom_nfc_controller_start())
+    {
+        return false;
+    }
+
+    if((cancel_cb != NULL && cancel_cb(user_ctx)) ||
+       !poom_nfc_reader_scan_once(&active, timeout_ms) || (active == NULL) ||
+       (cancel_cb != NULL && cancel_cb(user_ctx)))
+    {
+        rfalNfcDeactivate(RFAL_NFC_DEACTIVATE_IDLE);
+        rfalFieldOff();
+        return false;
+    }
+
+    (void)memset(out_dump, 0, sizeof(*out_dump));
+    const bool ok = poom_nfc_reader_create_dump_cancelable(
+        active, out_dump, cancel_cb, user_ctx);
 
     rfalNfcDeactivate(RFAL_NFC_DEACTIVATE_IDLE);
     rfalFieldOff();

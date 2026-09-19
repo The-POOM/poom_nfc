@@ -38,6 +38,14 @@ typedef enum
     POOM_MIFARE_RESTORE_NO_MEMORY,
 } poom_mifare_restore_status_t;
 
+/**
+ * @brief Predicate used to stop a long-running default-key discovery.
+ *
+ * @param[in] user_ctx Opaque context supplied by the caller.
+ * @return true when discovery should stop.
+ */
+typedef bool (*poom_mifare_cancel_cb_t)(void* user_ctx);
+
 typedef struct
 {
     uint16_t source_blocks;
@@ -165,6 +173,20 @@ uint16_t poom_mifare_classic_get_max_block(void);
  * @return true when at least one key is discovered.
  */
 bool poom_mifare_classic_discover_default_keys(bool try_key_b);
+
+/**
+ * @brief Scan sectors with the default keys while allowing cooperative cancellation.
+ *
+ * The callback is checked between authentication attempts. A NULL callback keeps
+ * the same behavior as `poom_mifare_classic_discover_default_keys()`.
+ *
+ * @param[in] try_key_b When true, try Key B discovery as well.
+ * @param[in] cancel_cb Optional predicate that requests cancellation.
+ * @param[in] user_ctx Opaque context passed to cancel_cb.
+ * @return true when at least one key is available and cancellation was not requested.
+ */
+bool poom_mifare_classic_discover_default_keys_cancelable(
+    bool try_key_b, poom_mifare_cancel_cb_t cancel_cb, void* user_ctx);
 
 /**
  * @brief Dump all Classic blocks and write a Flipper `.nfc` file to the SD card.

@@ -16,6 +16,8 @@ typedef enum {
     POOM_NFC_READER_TECH_ST25TB,
 } poom_nfc_reader_tech_t;
 
+typedef bool (*poom_nfc_reader_cancel_cb_t)(void *user_ctx);
+
 /**
  * @brief Initialize the NFC reader layer.
  *
@@ -71,3 +73,19 @@ const char *poom_nfc_reader_technology_to_str(poom_nfc_reader_tech_t tech);
  * For other tags, fills ID-only dump.
  */
 bool poom_nfc_reader_create_dump(const rfalNfcDevice *dev, poom_nfc_dump_t *out_dump);
+
+/**
+ * @brief Creates an ID-level capture and probes lightweight Type 2 metadata.
+ *
+ * This never reads the tag memory dump. For compatible Type 2 tags it also
+ * attempts GET_VERSION so the product can be identified without a full read.
+ */
+bool poom_nfc_reader_create_probe(const rfalNfcDevice *dev, poom_nfc_dump_t *out_dump);
+
+/**
+ * @brief Creates a full dump while allowing the caller to cancel between RF exchanges.
+ */
+bool poom_nfc_reader_create_dump_cancelable(const rfalNfcDevice *dev,
+                                            poom_nfc_dump_t *out_dump,
+                                            poom_nfc_reader_cancel_cb_t cancel_cb,
+                                            void *user_ctx);

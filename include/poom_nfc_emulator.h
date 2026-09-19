@@ -57,6 +57,7 @@ bool poom_nfc_emulator_set_mful_image_file(const char* path);
 bool poom_nfc_emulator_start(void);
 void poom_nfc_emulator_stop(void);
 bool poom_nfc_emulator_is_running(void);
+bool poom_nfc_emulator_is_amiibo(void);
 
 void poom_nfc_emulator_get_config(poom_nfc_emu_cfg_t* out_cfg);
 const char* poom_nfc_emulator_mode_to_str(poom_nfc_emu_mode_t mode);

@@ -35,6 +35,8 @@ struct poom_nfc_emu_mful
     uint8_t image[MFUL_PAGE_MAX * MFUL_PAGE_SIZE];
     uint8_t signature[32];
     uint8_t version[8];
+    uint8_t pwd[4];
+    uint8_t pack[2];
     uint16_t pages;
     uint8_t user_last;
     uint8_t dyn_lock_page;
@@ -45,12 +47,21 @@ struct poom_nfc_emu_mful
     uint8_t compat_page;
     bool compat_pending;
     bool auth_ok;
+    bool amiibo;
 };
 
 static const uint8_t s_factory[16] = {
     0x04, 0x3B, 0x99, 0x2E, 0x0A, 0x9D, 0x32, 0x80,
     0x25, 0x48, 0x0F, 0xE0, 0xF1, 0x10, 0xFF, 0xEE,
 };
+
+static void mful_amiibo_pwd_(const uint8_t uid[7], uint8_t pwd[4])
+{
+    pwd[0] = (uint8_t)(0xAAU ^ uid[1] ^ uid[3]);
+    pwd[1] = (uint8_t)(0x55U ^ uid[2] ^ uid[4]);
+    pwd[2] = (uint8_t)(0xAAU ^ uid[3] ^ uid[5]);
+    pwd[3] = (uint8_t)(0x55U ^ uid[4] ^ uid[6]);
+}
 
 static void mful_variant_(poom_nfc_emu_mful_t* m, uint16_t pages)
 {
@@ -91,6 +102,54 @@ static void mful_factory_(poom_nfc_emu_mful_t* m, poom_nfc_emu_cfg_t* cfg)
     }
 }
 
+static bool mful_looks_like_amiibo_(const poom_nfc_emu_mful_t* m,
+                                    const poom_nfc_emu_cfg_t* cfg)
+{
+    static const uint8_t ntag215_cc[4] = {0xE1U, 0x10U, 0x3EU, 0x00U};
+    static const uint8_t amiibo_otp[4] = {0xF1U, 0x10U, 0xFFU, 0xEEU};
+    static const uint8_t amiibo_cfg0[4] = {0x00U, 0x00U, 0x00U, 0x04U};
+    static const uint8_t amiibo_cfg1[4] = {0x5FU, 0x00U, 0x00U, 0x00U};
+    const uint8_t* page3;
+
+    if((m == NULL) || (cfg == NULL) || (m->pages != 135U) ||
+       (cfg->uid_len != 7U) || (cfg->uid[0] != 0x04U))
+    {
+        return false;
+    }
+
+    page3 = &m->image[3U * MFUL_PAGE_SIZE];
+    return (memcmp(page3, ntag215_cc, sizeof(ntag215_cc)) == 0 ||
+            memcmp(page3, amiibo_otp, sizeof(amiibo_otp)) == 0) &&
+           memcmp(&m->image[(uint16_t)m->cfg0_page * MFUL_PAGE_SIZE],
+                  amiibo_cfg0, sizeof(amiibo_cfg0)) == 0 &&
+           memcmp(&m->image[(uint16_t)m->cfg1_page * MFUL_PAGE_SIZE],
+                  amiibo_cfg1, sizeof(amiibo_cfg1)) == 0;
+}
+
+static void mful_prepare_credentials_(poom_nfc_emu_mful_t* m,
+                                      const poom_nfc_emu_cfg_t* cfg)
+{
+    uint8_t* const pwd_page = &m->image[(uint16_t)m->pwd_page * MFUL_PAGE_SIZE];
+    uint8_t* const pack_page = &m->image[(uint16_t)m->pack_page * MFUL_PAGE_SIZE];
+
+    memcpy(m->pwd, pwd_page, sizeof(m->pwd));
+    memcpy(m->pack, pack_page, sizeof(m->pack));
+
+    m->amiibo = mful_looks_like_amiibo_(m, cfg);
+    if(m->amiibo)
+    {
+        mful_amiibo_pwd_(cfg->uid, m->pwd);
+        m->pack[0] = 0x80U;
+        m->pack[1] = 0x80U;
+        printf("  nfc-emul: Amiibo-compatible NTAG215 detected; UID-derived PWD enabled\r\n");
+    }
+
+    /* PWD and PACK are write-only configuration values. Keep their readable
+     * page image zeroed and serve the real values only through PWD_AUTH. */
+    memset(pwd_page, 0, MFUL_PAGE_SIZE);
+    memset(pack_page, 0, MFUL_PAGE_SIZE);
+}
+
 static bool mful_hex_(char* text, uint8_t* out, size_t count)
 {
     char* save = NULL;
@@ -112,9 +171,11 @@ static bool mful_hex_(char* text, uint8_t* out, size_t count)
 static bool mful_load_text_(poom_nfc_emu_mful_t* m, FILE* f, poom_nfc_emu_cfg_t* cfg)
 {
     char line[320];
+    uint8_t parsed_version[8];
     uint16_t pages = 0U;
     bool is_mful = false;
     bool any_page = false;
+    bool has_parsed_version = false;
     rewind(f);
     while(fgets(line, sizeof(line), f) != NULL)
     {
@@ -149,7 +210,7 @@ static bool mful_load_text_(poom_nfc_emu_mful_t* m, FILE* f, poom_nfc_emu_cfg_t*
         else if(strcmp(line, "Mifare version") == 0 || strcmp(line, "Version bytes") == 0)
         {
             char copy[96]; strncpy(copy, value, sizeof(copy) - 1U); copy[sizeof(copy) - 1U] = '\0';
-            (void)mful_hex_(copy, m->version, sizeof(m->version));
+            has_parsed_version = mful_hex_(copy, parsed_version, sizeof(parsed_version));
         }
         else if(strncmp(line, "Page ", 5U) == 0)
         {
@@ -165,7 +226,26 @@ static bool mful_load_text_(poom_nfc_emu_mful_t* m, FILE* f, poom_nfc_emu_cfg_t*
         }
     }
     if(!is_mful || !any_page) return false;
-    mful_variant_(m, pages <= 45U ? 45U : (pages <= 135U ? 135U : 231U));
+
+    uint16_t variant_pages = 0U;
+    if(has_parsed_version && parsed_version[0] == 0x00U && parsed_version[1] == 0x04U)
+    {
+        if(parsed_version[6] == 0x0FU) variant_pages = 45U;
+        else if(parsed_version[6] == 0x11U) variant_pages = 135U;
+        else if(parsed_version[6] == 0x13U) variant_pages = 231U;
+    }
+    if(variant_pages == 0U)
+    {
+        /* POOM releases before 1.0.8 could save an NTAG215 as 136 pages,
+         * with page 135 containing the wrapped contents of page 0. */
+        variant_pages = pages <= 45U ? 45U : (pages <= 136U ? 135U : 231U);
+    }
+
+    mful_variant_(m, variant_pages);
+    if(has_parsed_version)
+    {
+        memcpy(m->version, parsed_version, sizeof(m->version));
+    }
     return cfg->uid_len == 7U;
 }
 
@@ -213,6 +293,35 @@ static bool mful_requires_auth_(const poom_nfc_emu_mful_t* m, uint8_t page, bool
     return auth0 <= page && (write || prot) && !m->auth_ok;
 }
 
+static uint8_t mful_read_byte_(const poom_nfc_emu_mful_t* m, uint16_t byte_offset)
+{
+    const uint16_t image_len = (uint16_t)(m->pages * MFUL_PAGE_SIZE);
+    const uint16_t wrapped = (uint16_t)(byte_offset % image_len);
+    const uint8_t page = (uint8_t)(wrapped / MFUL_PAGE_SIZE);
+
+    if((page == m->pwd_page) || (page == m->pack_page))
+    {
+        return 0U;
+    }
+    return m->image[wrapped];
+}
+
+static void mful_write_page_(poom_nfc_emu_mful_t* m, uint8_t page,
+                             const uint8_t data[MFUL_PAGE_SIZE])
+{
+    if(page == m->pwd_page)
+    {
+        memcpy(m->pwd, data, sizeof(m->pwd));
+        return;
+    }
+    if(page == m->pack_page)
+    {
+        memcpy(m->pack, data, sizeof(m->pack));
+        return;
+    }
+    memcpy(&m->image[(uint16_t)page * MFUL_PAGE_SIZE], data, MFUL_PAGE_SIZE);
+}
+
 static uint16_t mful_nak_(uint8_t* rsp, bool* restart)
 {
     rsp[0] = MFUL_NAK;
@@ -232,6 +341,7 @@ poom_nfc_emu_mful_t* poom_nfc_emu_mful_alloc(const char* path, poom_nfc_emu_cfg_
         heap_caps_free(m);
         return NULL;
     }
+    mful_prepare_credentials_(m, cfg);
     return m;
 }
 
@@ -247,6 +357,11 @@ void poom_nfc_emu_mful_reset(poom_nfc_emu_mful_t* instance)
     instance->compat_pending = false;
 }
 
+bool poom_nfc_emu_mful_is_amiibo(const poom_nfc_emu_mful_t* instance)
+{
+    return (instance != NULL) && instance->amiibo;
+}
+
 uint16_t poom_nfc_emu_mful_process(poom_nfc_emu_mful_t* m, const uint8_t* cmd,
                                     uint16_t cmd_len, uint8_t* rsp, uint16_t rsp_max,
                                     bool* restart)
@@ -259,7 +374,7 @@ uint16_t poom_nfc_emu_mful_process(poom_nfc_emu_mful_t* m, const uint8_t* cmd,
         m->compat_pending = false;
         if(cmd_len != 16U || mful_locked_(m, m->compat_page) || mful_requires_auth_(m, m->compat_page, true))
             return mful_nak_(rsp, restart);
-        memcpy(&m->image[(uint16_t)m->compat_page * 4U], cmd, 4U);
+        mful_write_page_(m, m->compat_page, cmd);
         rsp[0] = MFUL_ACK;
         return MFUL_ACK_BITS;
     }
@@ -270,21 +385,27 @@ uint16_t poom_nfc_emu_mful_process(poom_nfc_emu_mful_t* m, const uint8_t* cmd,
             if(cmd_len != 2U || page >= m->pages || rsp_max < MFUL_READ_LEN || mful_requires_auth_(m, page, false))
                 return mful_nak_(rsp, restart);
             for(uint8_t i = 0U; i < MFUL_READ_LEN; i++)
-                rsp[i] = m->image[(((uint16_t)page * 4U + i) % ((uint16_t)m->pages * 4U))];
+                rsp[i] = mful_read_byte_(m, (uint16_t)page * MFUL_PAGE_SIZE + i);
             return rfalConvBytesToBits(MFUL_READ_LEN);
         case MFUL_FAST_READ:
             if(cmd_len != 3U || page > cmd[2] || cmd[2] >= m->pages ||
                (uint16_t)(cmd[2] - page + 1U) * 4U > rsp_max || mful_requires_auth_(m, page, false))
                 return mful_nak_(rsp, restart);
-            memcpy(rsp, &m->image[(uint16_t)page * 4U], (size_t)(cmd[2] - page + 1U) * 4U);
-            return rfalConvBytesToBits((uint16_t)(cmd[2] - page + 1U) * 4U);
+            {
+                const uint16_t response_len = (uint16_t)(cmd[2] - page + 1U) * MFUL_PAGE_SIZE;
+                for(uint16_t i = 0U; i < response_len; i++)
+                {
+                    rsp[i] = mful_read_byte_(m, (uint16_t)page * MFUL_PAGE_SIZE + i);
+                }
+                return rfalConvBytesToBits(response_len);
+            }
         case MFUL_WRITE:
             if(cmd_len != 6U || page >= m->pages || mful_locked_(m, page) || mful_requires_auth_(m, page, true))
                 return mful_nak_(rsp, restart);
             if(page == 2U || page == 3U)
                 for(uint8_t i = 0U; i < 4U; i++) m->image[(uint16_t)page * 4U + i] |= cmd[2U + i];
             else
-                memcpy(&m->image[(uint16_t)page * 4U], &cmd[2], 4U);
+                mful_write_page_(m, page, &cmd[2]);
             rsp[0] = MFUL_ACK;
             return MFUL_ACK_BITS;
         case MFUL_COMPAT_WRITE:
@@ -293,11 +414,11 @@ uint16_t poom_nfc_emu_mful_process(poom_nfc_emu_mful_t* m, const uint8_t* cmd,
             m->compat_page = page; m->compat_pending = true; rsp[0] = MFUL_ACK;
             return MFUL_ACK_BITS;
         case MFUL_PWD_AUTH:
-            if(cmd_len != 5U || memcmp(&cmd[1], &m->image[(uint16_t)m->pwd_page * 4U], 4U) != 0)
+            if(cmd_len != 5U || memcmp(&cmd[1], m->pwd, sizeof(m->pwd)) != 0)
                 return mful_nak_(rsp, restart);
             if(rsp_max < 2U) return 0U;
             m->auth_ok = true;
-            memcpy(rsp, &m->image[(uint16_t)m->pack_page * 4U], 2U);
+            memcpy(rsp, m->pack, sizeof(m->pack));
             return 16U;
         case MFUL_GET_VERSION:
             if(cmd_len != 1U || rsp_max < sizeof(m->version)) return mful_nak_(rsp, restart);
@@ -316,4 +437,3 @@ uint16_t poom_nfc_emu_mful_process(poom_nfc_emu_mful_t* m, const uint8_t* cmd,
     }
     return mful_nak_(rsp, restart);
 }
-

@@ -59,6 +59,7 @@
 
 #define DEMO_DEV_LIMIT  4
 #define DEMO_NFCV_BLOCK_LEN 4
+#define POOM_NFC_T2T_RESPONSE_TIMEOUT_MS (10U)
 
 /* Reverse bytes helper for NFC-V UIDs. */
 #define REVERSE_BYTES(pData, nDataSize) \
@@ -224,7 +225,7 @@ static bool poom_nfc_reader_t2t_read_4pages_(uint8_t start_page, uint8_t out16[1
                                   16U,
                                   &rx_len,
                                   RFAL_TXRX_FLAGS_DEFAULT,
-                                  RFAL_FWT_NONE) == ERR_NONE)
+                                  rfalConvMsTo1fc(POOM_NFC_T2T_RESPONSE_TIMEOUT_MS)) == ERR_NONE)
     {
         if(rx_len >= 16U)
         {
@@ -332,7 +333,7 @@ const char *poom_nfc_reader_technology_to_str(poom_nfc_reader_tech_t tech)
     }
 }
 
-bool poom_nfc_reader_create_dump(const rfalNfcDevice *dev, poom_nfc_dump_t *out_dump)
+bool poom_nfc_reader_create_probe(const rfalNfcDevice *dev, poom_nfc_dump_t *out_dump)
 {
     poom_nfc_card_id_t id;
 
@@ -351,10 +352,10 @@ bool poom_nfc_reader_create_dump(const rfalNfcDevice *dev, poom_nfc_dump_t *out_
         return false;
     }
     out_dump->id = id;
+    out_dump->read_ok = true;
 
     if(!poom_nfc_reader_is_nfca_type_(dev->type))
     {
-        out_dump->read_ok = true;
         return true;
     }
 
@@ -362,16 +363,70 @@ bool poom_nfc_reader_create_dump(const rfalNfcDevice *dev, poom_nfc_dump_t *out_
     uint8_t sak = id.sak;
     nfc_card_type_t detected = nfc_ident_detect_nfca(atqa, sak);
 
-    if((detected != NFC_CARD_ULTRALIGHT_OR_NTAG) && (detected != NFC_CARD_NTAG424DNA))
+    if(detected != NFC_CARD_ULTRALIGHT_OR_NTAG)
     {
-        out_dump->read_ok = true;
+        return true;
+    }
+
+    {
+        nfc_get_version_info_t gv;
+        if(nfc_ident_try_get_version(detected, nfc_link_transceive, nfc_link_transceive, NULL, &gv) &&
+           (gv.kind == NFC_GV_T2T_UL_NTAG) && gv.u.t2t.valid)
+        {
+            out_dump->has_version_bytes = true;
+            (void)memcpy(out_dump->version_bytes, gv.u.t2t.raw, sizeof(out_dump->version_bytes));
+        }
+    }
+
+    return true;
+}
+
+static bool poom_nfc_reader_cancelled_(poom_nfc_reader_cancel_cb_t cancel_cb,
+                                       void *user_ctx)
+{
+    return (cancel_cb != NULL) && cancel_cb(user_ctx);
+}
+
+bool poom_nfc_reader_create_dump_cancelable(const rfalNfcDevice *dev,
+                                            poom_nfc_dump_t *out_dump,
+                                            poom_nfc_reader_cancel_cb_t cancel_cb,
+                                            void *user_ctx)
+{
+    if((dev == NULL) || (out_dump == NULL) ||
+       poom_nfc_reader_cancelled_(cancel_cb, user_ctx))
+    {
+        return false;
+    }
+
+    if(!poom_nfc_reader_create_probe(dev, out_dump))
+    {
+        return false;
+    }
+
+    if(poom_nfc_reader_cancelled_(cancel_cb, user_ctx))
+    {
+        return false;
+    }
+
+    if(!poom_nfc_reader_is_nfca_type_(dev->type))
+    {
+        return true;
+    }
+
+    const uint16_t atqa = ((uint16_t)out_dump->id.atqa[1] << 8) |
+                          (uint16_t)out_dump->id.atqa[0];
+    const nfc_card_type_t detected = nfc_ident_detect_nfca(atqa, out_dump->id.sak);
+    if(detected != NFC_CARD_ULTRALIGHT_OR_NTAG)
+    {
         return true;
     }
 
     out_dump->read_mode = POOM_NFC_DUMP_READ_FULL;
+    out_dump->read_ok = false;
 
     uint16_t pages_total = 0U;
     uint16_t pages_read = 0U;
+    uint16_t user_end = 0U;
 
     uint8_t buf16[16];
     if(!poom_nfc_reader_t2t_read_4pages_(0U, buf16))
@@ -388,35 +443,39 @@ bool poom_nfc_reader_create_dump(const rfalNfcDevice *dev, poom_nfc_dump_t *out_
     }
     pages_read = 4U;
 
-    {
-        nfc_get_version_info_t gv;
-        if(nfc_ident_try_get_version(detected, nfc_link_transceive, nfc_link_transceive, NULL, &gv) &&
-           (gv.kind == NFC_GV_T2T_UL_NTAG) && gv.u.t2t.valid)
-        {
-            out_dump->has_version_bytes = true;
-            (void)memcpy(out_dump->version_bytes, gv.u.t2t.raw, sizeof(out_dump->version_bytes));
-        }
-    }
-
-    if(poom_nfc_reader_t2t_read_signature_(out_dump->signature))
+    if(!poom_nfc_reader_cancelled_(cancel_cb, user_ctx) &&
+       poom_nfc_reader_t2t_read_signature_(out_dump->signature))
     {
         out_dump->has_signature = true;
     }
 
-    const uint8_t *cc = out_dump->pages[3];
-    if((cc[0] == 0xE1U) && (cc[2] != 0U))
+    if(out_dump->has_version_bytes)
     {
-        const uint16_t user_pages = (uint16_t)cc[2] * 2U; /* 8-byte blocks => 2 pages per block */
-        uint16_t user_end = (user_pages > 0U) ? (uint16_t)(4U + user_pages - 1U) : 0U;
-        uint16_t total = (user_end > 0U) ? (uint16_t)(user_end + 6U) : 0U; /* NTAG21x layout: user_end + 6 pages */
-
-        if(total > POOM_NFC_DUMP_MAX_PAGES)
+        switch(out_dump->version_bytes[6])
         {
-            total = POOM_NFC_DUMP_MAX_PAGES;
+            case 0x0FU: pages_total = 45U;  user_end = 39U;  break; /* NTAG213 */
+            case 0x11U: pages_total = 135U; user_end = 129U; break; /* NTAG215 */
+            case 0x13U: pages_total = 231U; user_end = 225U; break; /* NTAG216 */
+            default: break;
+        }
+    }
+
+    const uint8_t *cc = out_dump->pages[3];
+    if((pages_total == 0U) && (cc[0] == 0xE1U) && (cc[2] != 0U))
+    {
+        const uint16_t user_pages = (uint16_t)cc[2] * 2U;
+        user_end = (uint16_t)(4U + user_pages - 1U);
+        pages_total = (uint16_t)(user_end + 6U);
+    }
+
+    if(pages_total > 0U)
+    {
+        if(pages_total > POOM_NFC_DUMP_MAX_PAGES)
+        {
+            pages_total = POOM_NFC_DUMP_MAX_PAGES;
         }
 
-        pages_total = total;
-        if((pages_total > 0U) && (user_end >= pages_total))
+        if(user_end >= pages_total)
         {
             user_end = (uint16_t)(pages_total - 1U);
         }
@@ -432,6 +491,11 @@ bool poom_nfc_reader_create_dump(const rfalNfcDevice *dev, poom_nfc_dump_t *out_
     {
         for(uint16_t page = 4U; page < pages_total; page = (uint16_t)(page + 4U))
         {
+            if(poom_nfc_reader_cancelled_(cancel_cb, user_ctx))
+            {
+                return false;
+            }
+
             uint16_t start = page;
             if((start + 4U) > pages_total)
             {
@@ -471,6 +535,11 @@ bool poom_nfc_reader_create_dump(const rfalNfcDevice *dev, poom_nfc_dump_t *out_
     {
         for(uint16_t page = 4U; (page + 3U) < POOM_NFC_DUMP_MAX_PAGES; page = (uint16_t)(page + 4U))
         {
+            if(poom_nfc_reader_cancelled_(cancel_cb, user_ctx))
+            {
+                return false;
+            }
+
             if(!poom_nfc_reader_t2t_read_4pages_((uint8_t)page, buf16))
             {
                 break;
@@ -497,8 +566,15 @@ bool poom_nfc_reader_create_dump(const rfalNfcDevice *dev, poom_nfc_dump_t *out_
         }
     }
 
-    out_dump->read_ok = (out_dump->pages_read > 0U);
+    out_dump->read_ok = (out_dump->pages_read > 0U) &&
+                        ((out_dump->pages_total == 0U) ||
+                         (out_dump->pages_read == out_dump->pages_total));
     return true;
+}
+
+bool poom_nfc_reader_create_dump(const rfalNfcDevice *dev, poom_nfc_dump_t *out_dump)
+{
+    return poom_nfc_reader_create_dump_cancelable(dev, out_dump, NULL, NULL);
 }
 
 bool poom_nfc_reader_scan_once(rfalNfcDevice **activeDevOut, uint32_t timeout_ms)
@@ -827,56 +903,6 @@ static void print_iso_dep_details_(const rfalNfcDevice *dev)
 }
 
 /**
- * @brief Internal helper for `print_get_version_details`.
- *
- * @param[in] detected_type Parameter passed to the function.
- * @return void
- */
-static void print_get_version_details_(nfc_card_type_t detected_type)
-{
-    nfc_get_version_info_t gv;
-
-    if(!nfc_ident_try_get_version(detected_type, nfc_link_transceive, nfc_link_transceive, NULL, &gv))
-    {
-        return;
-    }
-
-    printf("\n      GET_VERSION:");
-
-    if((gv.kind == NFC_GV_T2T_UL_NTAG) && gv.u.t2t.valid)
-    {
-        printf(" raw=");
-        print_hex_compact_(gv.u.t2t.raw, sizeof(gv.u.t2t.raw));
-        printf(" || vendor=0x%02X prod=0x%02X/%02X ver=%u.%u size=0x%02X proto=0x%02X",
-               gv.u.t2t.vendor_id,
-               gv.u.t2t.product_type,
-               gv.u.t2t.product_subtype,
-               (unsigned)gv.u.t2t.major_version,
-               (unsigned)gv.u.t2t.minor_version,
-               gv.u.t2t.storage_size,
-               gv.u.t2t.protocol_type);
-        return;
-    }
-
-    if((gv.kind == NFC_GV_DESFIRE_APDU) && gv.u.df.valid)
-    {
-        size_t preview_len = gv.u.df.raw_len;
-        if(preview_len > 16U)
-        {
-            preview_len = 16U;
-        }
-
-        printf(" sw=%02X%02X raw=", gv.u.df.sw1, gv.u.df.sw2);
-        print_hex_compact_(gv.u.df.raw, preview_len);
-        if(gv.u.df.raw_len > preview_len)
-        {
-            printf("...");
-        }
-        printf(" || len=%u", (unsigned)gv.u.df.raw_len);
-    }
-}
-
-/**
  * @brief Internal helper for `print_found_devices`.
  *
  * @param[in] active_dev Parameter passed to the function.
@@ -929,11 +955,6 @@ static void print_found_devices(const rfalNfcDevice *active_dev)
             if(d->rfInterface == RFAL_NFC_INTERFACE_ISODEP)
             {
                 print_iso_dep_details_(d);
-            }
-
-            if((active_dev != NULL) && poom_nfc_reader_same_device_(d, active_dev))
-            {
-                print_get_version_details_(ct);
             }
 
             printf("\r\n");
@@ -1035,8 +1056,11 @@ static bool nfc_link_transceive(
         PRINTF_HEX(tx, tx_len);
     }
 
+    const uint32_t fwt = rf_interface
+        ? rfalConvMsTo1fc(POOM_NFC_T2T_RESPONSE_TIMEOUT_MS)
+        : RFAL_FWT_NONE;
     ReturnCode err = demoTransceiveBlocking((uint8_t*)tx, tx_units,
-                                           &rxData, &rcvLen, RFAL_FWT_NONE);
+                                           &rxData, &rcvLen, fwt);
 
     if(err != ERR_NONE || !rxData || !rcvLen) {
         printf_log("[RX] error=%d", err);

@@ -992,6 +992,13 @@ bool poom_nfc_emulator_is_running(void)
     return s_emu.running;
 }
 
+bool poom_nfc_emulator_is_amiibo(void)
+{
+    poom_nfc_emulator_init();
+    return (s_emu.cfg.mode == POOM_NFC_EMU_MODE_MFUL) &&
+           poom_nfc_emu_mful_is_amiibo(s_emu.mful);
+}
+
 void poom_nfc_emulator_get_config(poom_nfc_emu_cfg_t* out_cfg)
 {
     poom_nfc_emulator_init();

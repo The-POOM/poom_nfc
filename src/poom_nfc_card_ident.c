@@ -256,18 +256,18 @@ static bool df_is_sw_ok(uint8_t sw1, uint8_t sw2)         { return (sw1 == 0x91 
 static bool t2t_parse_get_version(const uint8_t *rx, size_t rx_len, nfc_t2t_get_version_t *out)
 {
     if(!rx || !out) return false;
-    if(rx_len < 8) return false;
+    if((rx_len < 8U) || (rx[0] != 0x00U)) return false;
 
     memset(out, 0, sizeof(*out));
     memcpy(out->raw, rx, 8);
 
-    out->vendor_id       = rx[0];
-    out->product_type    = rx[1];
-    out->product_subtype = rx[2];
-    out->major_version   = rx[3];
-    out->minor_version   = rx[4];
-    out->storage_size    = rx[5];
-    out->protocol_type   = rx[6];
+    out->vendor_id       = rx[1];
+    out->product_type    = rx[2];
+    out->product_subtype = rx[3];
+    out->major_version   = rx[4];
+    out->minor_version   = rx[5];
+    out->storage_size    = rx[6];
+    out->protocol_type   = rx[7];
 
     out->valid = true;
     return true;

@@ -2448,7 +2448,9 @@ static bool poom_mifare_try_discover_pass_(bool try_key_b,
                                            uint8_t sectors,
                                            uint8_t* unknown_a,
                                            uint8_t* unknown_b,
-                                           bool* found_any)
+                                           bool* found_any,
+                                           poom_mifare_cancel_cb_t cancel_cb,
+                                           void* user_ctx)
 {
     bool matched = false;
 
@@ -2459,6 +2461,11 @@ static bool poom_mifare_try_discover_pass_(bool try_key_b,
 
     for(uint8_t s = 0U; s < sectors; s++)
     {
+        if(cancel_cb != NULL && cancel_cb(user_ctx))
+        {
+            break;
+        }
+
         if(*unknown_a != 0U && !poom_mifare_sector_key_known_(s, POOM_MIFARE_KEY_A))
         {
             if(poom_mifare_auth_try_key_for_sector_(s, POOM_MIFARE_KEY_A, key))
@@ -2476,6 +2483,11 @@ static bool poom_mifare_try_discover_pass_(bool try_key_b,
                 }
                 printf("\r\n");
             }
+        }
+
+        if(cancel_cb != NULL && cancel_cb(user_ctx))
+        {
+            break;
         }
 
         if(try_key_b && *unknown_b != 0U &&
@@ -2898,7 +2910,8 @@ poom_mifare_restore_status_t poom_mifare_classic_restore_file(
     return (result.failed == 0U) ? POOM_MIFARE_RESTORE_OK : POOM_MIFARE_RESTORE_PARTIAL;
 }
 
-bool poom_mifare_classic_discover_default_keys(bool try_key_b)
+bool poom_mifare_classic_discover_default_keys_cancelable(
+    bool try_key_b, poom_mifare_cancel_cb_t cancel_cb, void* user_ctx)
 {
     bool found_any = false;
     bool had_known = false;
@@ -2954,17 +2967,26 @@ bool poom_mifare_classic_discover_default_keys(bool try_key_b)
 
     for(size_t k = 0U; k < (sizeof(s_priority_keys) / sizeof(s_priority_keys[0])); k++)
     {
+        if(cancel_cb != NULL && cancel_cb(user_ctx))
+        {
+            break;
+        }
         if(unknown_a == 0U && unknown_b == 0U)
         {
             break;
         }
 
         (void)poom_mifare_try_discover_pass_(
-            try_key_b, s_priority_keys[k], sectors, &unknown_a, &unknown_b, &found_any);
+            try_key_b, s_priority_keys[k], sectors, &unknown_a, &unknown_b, &found_any,
+            cancel_cb, user_ctx);
     }
 
     for(size_t k = 0U; k < dict_n; k++)
     {
+        if(cancel_cb != NULL && cancel_cb(user_ctx))
+        {
+            break;
+        }
         if(unknown_a == 0U && unknown_b == 0U)
         {
             break;
@@ -2992,12 +3014,18 @@ bool poom_mifare_classic_discover_default_keys(bool try_key_b)
         }
 
         (void)poom_mifare_try_discover_pass_(
-            try_key_b, key, sectors, &unknown_a, &unknown_b, &found_any);
+            try_key_b, key, sectors, &unknown_a, &unknown_b, &found_any,
+            cancel_cb, user_ctx);
     }
 
     s_mifare_discover_quiet = false;
 
-    return found_any || had_known;
+    return (cancel_cb == NULL || !cancel_cb(user_ctx)) && (found_any || had_known);
+}
+
+bool poom_mifare_classic_discover_default_keys(bool try_key_b)
+{
+    return poom_mifare_classic_discover_default_keys_cancelable(try_key_b, NULL, NULL);
 }
 
 /**

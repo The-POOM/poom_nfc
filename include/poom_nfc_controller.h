@@ -25,6 +25,8 @@ typedef enum {
     POOM_NFC_CTRL_TECH_ST25TB,
 } poom_nfc_ctrl_tech_t;
 
+typedef bool (*poom_nfc_cancel_cb_t)(void *user_ctx);
+
 bool poom_nfc_controller_start(void);
 bool poom_nfc_controller_scan_once(uint32_t timeout_ms);
 bool poom_nfc_controller_scan_found_cards(uint32_t timeout_ms,
@@ -45,10 +47,24 @@ bool poom_nfc_controller_scan_found_cards(uint32_t timeout_ms,
 bool poom_nfc_controller_capture_dump(uint32_t timeout_ms, poom_nfc_dump_t *out_dump);
 
 /**
+ * @brief Capture only card identity and lightweight metadata (no memory dump).
+ */
+bool poom_nfc_controller_capture_probe(uint32_t timeout_ms, poom_nfc_dump_t *out_dump);
+
+/**
+ * @brief Capture a full dump with cancellation checks between RF exchanges.
+ */
+bool poom_nfc_controller_capture_dump_cancelable(
+    uint32_t timeout_ms,
+    poom_nfc_dump_t *out_dump,
+    poom_nfc_cancel_cb_t cancel_cb,
+    void *user_ctx);
+
+/**
  * @brief Capture a detailed dump of a nearby NFC tag and save it to SD card.
  *
  * @param[in] timeout_ms Time to wait for tag activation.
- * @param[out] out_rel_path Optional output relative path (e.g. "/nfc_dumps/x.nfc").
+ * @param[out] out_rel_path Optional output relative path (e.g. "/nfc/x.nfc").
  * @param[in] out_rel_path_len Output buffer length.
  * @return ESP_OK on success, otherwise an ESP error code.
  */
@@ -61,7 +77,7 @@ esp_err_t poom_nfc_controller_dump_to_sd(uint32_t timeout_ms, char *out_rel_path
  * if only ID-level data is available.
  *
  * @param[in] timeout_ms Time to wait for tag activation.
- * @param[out] out_rel_path Optional output relative path (e.g. "/nfc_dumps/x.nfc").
+ * @param[out] out_rel_path Optional output relative path (e.g. "/nfc/x.nfc").
  * @param[in] out_rel_path_len Output buffer length.
  * @return ESP_OK on success, otherwise an ESP error code.
  */
