@@ -319,7 +319,7 @@ nfc-core-stop
 
 **`nfc-mful-save [timeout_ms]`**
 
-- Saves an MFUL/Type 2 `.nfc` dump to `/nfc_dumps` for emulation.
+- Saves an MFUL/Type 2 `.nfc` dump to `/nfc` for emulation.
 - If `READ_SIG (0x3C)` succeeds, the signature is included in the `.nfc`.
 - The emulator supports Flipper-style `.nfc`, POOM `.nfc`, and legacy `.bin`.
 
@@ -508,6 +508,6 @@ nfc-core-start
 nfc-emul-reset
 nfc-emul-set mode mful
 nfc-emul-set uid 04112233445566
-nfc-emul-set image /sdcard/nfc_dumps/nfc_xxx.nfc
+nfc-emul-set image /sdcard/nfc/nfc_xxx.nfc
 nfc-emul-start
 ```

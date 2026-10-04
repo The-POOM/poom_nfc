@@ -84,6 +84,8 @@ enum
     POOM_EMV_TAG_APPLICATION_CRYPTOGRAM = 0x9F26U,
     POOM_EMV_TAG_CRYPTOGRAM_INFORMATION_DATA = 0x9F27U,
     POOM_EMV_TAG_APPLICATION_PROGRAM_IDENTIFIER = 0x9F5AU,
+    POOM_EMV_TAG_SIGNED_STATIC_APPLICATION_DATA = 0x93U,
+    POOM_EMV_TAG_SIGNED_DYNAMIC_APPLICATION_DATA = 0x9F4BU,
     /* Scheme-specific meanings: never interpret these in the common decoder. */
     POOM_EMV_TAG_SCHEME_9F5D = 0x9F5DU,
     POOM_EMV_TAG_SCHEME_9F6C = 0x9F6CU,
@@ -128,20 +130,36 @@ static unsigned s_poom_nfc_emv_transport_failures;
 
 poom_nfc_emv_scheme_t poom_nfc_emv_scheme_from_aid(const uint8_t* aid, size_t aid_len)
 {
-    static const uint8_t visa_rid[5] = {0xA0U, 0x00U, 0x00U, 0x00U, 0x03U};
-    static const uint8_t mastercard_rid[5] = {0xA0U, 0x00U, 0x00U, 0x00U, 0x04U};
+    static const struct
+    {
+        uint8_t rid[5];
+        poom_nfc_emv_scheme_t scheme;
+    } rid_map[] = {
+        {{0xA0U,0x00U,0x00U,0x00U,0x03U}, POOM_NFC_EMV_SCHEME_VISA},
+        {{0xA0U,0x00U,0x00U,0x00U,0x98U}, POOM_NFC_EMV_SCHEME_VISA},
+        {{0xA0U,0x00U,0x00U,0x00U,0x04U}, POOM_NFC_EMV_SCHEME_MASTERCARD},
+        {{0xA0U,0x00U,0x00U,0x00U,0x05U}, POOM_NFC_EMV_SCHEME_MASTERCARD},
+        {{0xA0U,0x00U,0x00U,0x00U,0x25U}, POOM_NFC_EMV_SCHEME_AMEX},
+        {{0xA0U,0x00U,0x00U,0x00U,0x65U}, POOM_NFC_EMV_SCHEME_JCB},
+        {{0xA0U,0x00U,0x00U,0x01U,0x52U}, POOM_NFC_EMV_SCHEME_DISCOVER},
+        {{0xA0U,0x00U,0x00U,0x03U,0x24U}, POOM_NFC_EMV_SCHEME_DISCOVER},
+        {{0xA0U,0x00U,0x00U,0x03U,0x33U}, POOM_NFC_EMV_SCHEME_UNIONPAY},
+        {{0xA0U,0x00U,0x00U,0x02U,0x77U}, POOM_NFC_EMV_SCHEME_INTERAC},
+        {{0xA0U,0x00U,0x00U,0x00U,0x42U}, POOM_NFC_EMV_SCHEME_CB},
+        {{0xA0U,0x00U,0x00U,0x06U,0x20U}, POOM_NFC_EMV_SCHEME_EFTPOS},
+        {{0xA0U,0x00U,0x00U,0x05U,0x24U}, POOM_NFC_EMV_SCHEME_RUPAY},
+    };
 
-    if(aid == NULL || aid_len < sizeof(visa_rid))
+    if(aid == NULL || aid_len < sizeof(rid_map[0].rid))
     {
         return POOM_NFC_EMV_SCHEME_UNKNOWN;
     }
-    if(memcmp(aid, visa_rid, sizeof(visa_rid)) == 0)
+    for(size_t i = 0U; i < sizeof(rid_map) / sizeof(rid_map[0]); i++)
     {
-        return POOM_NFC_EMV_SCHEME_VISA;
-    }
-    if(memcmp(aid, mastercard_rid, sizeof(mastercard_rid)) == 0)
-    {
-        return POOM_NFC_EMV_SCHEME_MASTERCARD;
+        if(memcmp(aid, rid_map[i].rid, sizeof(rid_map[i].rid)) == 0)
+        {
+            return rid_map[i].scheme;
+        }
     }
     return POOM_NFC_EMV_SCHEME_UNKNOWN;
 }
@@ -152,6 +170,14 @@ const char* poom_nfc_emv_scheme_str(poom_nfc_emv_scheme_t scheme)
     {
         case POOM_NFC_EMV_SCHEME_VISA: return "Visa";
         case POOM_NFC_EMV_SCHEME_MASTERCARD: return "Mastercard";
+        case POOM_NFC_EMV_SCHEME_AMEX: return "American Express";
+        case POOM_NFC_EMV_SCHEME_JCB: return "JCB";
+        case POOM_NFC_EMV_SCHEME_DISCOVER: return "Discover/Diners";
+        case POOM_NFC_EMV_SCHEME_UNIONPAY: return "UnionPay";
+        case POOM_NFC_EMV_SCHEME_INTERAC: return "Interac";
+        case POOM_NFC_EMV_SCHEME_CB: return "Cartes Bancaires";
+        case POOM_NFC_EMV_SCHEME_EFTPOS: return "eftpos";
+        case POOM_NFC_EMV_SCHEME_RUPAY: return "RuPay";
         default: return "Unknown";
     }
 }
@@ -162,7 +188,80 @@ const char* poom_nfc_emv_kernel_hint_str(poom_nfc_emv_scheme_t scheme)
     {
         case POOM_NFC_EMV_SCHEME_VISA: return "Kernel 3 family (expected)";
         case POOM_NFC_EMV_SCHEME_MASTERCARD: return "Kernel 2 family (expected)";
+        case POOM_NFC_EMV_SCHEME_AMEX: return "Kernel 4 family (expected)";
+        case POOM_NFC_EMV_SCHEME_JCB: return "Kernel 5 family (expected)";
+        case POOM_NFC_EMV_SCHEME_DISCOVER: return "Kernel 6 family (expected)";
+        case POOM_NFC_EMV_SCHEME_UNIONPAY: return "Kernel 7 family (expected)";
+        case POOM_NFC_EMV_SCHEME_INTERAC: return "Interac family (expected)";
+        case POOM_NFC_EMV_SCHEME_CB: return "CB contactless family";
+        case POOM_NFC_EMV_SCHEME_EFTPOS: return "eftpos contactless family";
+        case POOM_NFC_EMV_SCHEME_RUPAY: return "RuPay contactless family";
         default: return "Not inferred";
+    }
+}
+const char* poom_nfc_emv_tag_name(uint32_t tag)
+{
+    switch(tag)
+    {
+        case 0x4FU: return "Application identifier";
+        case 0x50U: return "Application label";
+        case 0x57U: return "Track 2 equivalent";
+        case 0x5AU: return "PAN";
+        case 0x5F20U: return "Cardholder name";
+        case 0x5F24U: return "Expiration date";
+        case 0x5F25U: return "Effective date";
+        case 0x5F28U: return "Issuer country";
+        case 0x5F2AU: return "Transaction currency";
+        case 0x5F2DU: return "Language preference";
+        case 0x5F34U: return "PAN sequence";
+        case 0x82U: return "AIP";
+        case 0x87U: return "Application priority";
+        case 0x8CU: return "CDOL1";
+        case 0x8DU: return "CDOL2";
+        case 0x8EU: return "CVM list";
+        case 0x8FU: return "CA public key index";
+        case 0x90U: return "Issuer public key certificate";
+        case 0x92U: return "Issuer public key remainder";
+        case 0x93U: return "Signed static application data";
+        case 0x94U: return "AFL";
+        case 0x9F02U: return "Amount authorised";
+        case 0x9F03U: return "Amount other";
+        case 0x9F07U: return "Application usage control";
+        case 0x9F08U: return "Application version";
+        case 0x9F0DU: return "Issuer action default";
+        case 0x9F0EU: return "Issuer action denial";
+        case 0x9F0FU: return "Issuer action online";
+        case 0x9F10U: return "Issuer application data";
+        case 0x9F13U: return "Last online ATC";
+        case 0x9F14U: return "Lower offline limit";
+        case 0x9F17U: return "PIN try counter";
+        case 0x9F23U: return "Upper offline limit";
+        case 0x9F26U: return "Application cryptogram";
+        case 0x9F27U: return "Cryptogram information";
+        case 0x9F32U: return "Issuer public key exponent";
+        case 0x9F34U: return "CVM results";
+        case 0x9F36U: return "ATC";
+        case 0x9F38U: return "PDOL";
+        case 0x9F42U: return "Application currency";
+        case 0x9F46U: return "ICC public key certificate";
+        case 0x9F47U: return "ICC public key exponent";
+        case 0x9F48U: return "ICC public key remainder";
+        case 0x9F49U: return "DDOL";
+        case 0x9F4AU: return "SDA tag list";
+        case 0x9F4BU: return "Signed dynamic application data";
+        case 0x9F4DU: return "Log entry";
+        case 0x9F4FU: return "Log format";
+        case 0x9F50U: return "Offline accumulator balance";
+        case 0x9F51U: return "Application currency contactless";
+        case 0x9F52U: return "Application default action";
+        case 0x9F58U: return "Lower consecutive offline limit";
+        case 0x9F59U: return "Upper consecutive offline limit";
+        case 0x9F5AU: return "Application program identifier";
+        case 0x9F5CU: return "Cumulative total";
+        case 0x9F6CU: return "Card transaction qualifiers";
+        case 0x9F6EU: return "Form factor or third-party data";
+        case 0x9F7CU: return "Customer exclusive data";
+        default: return NULL;
     }
 }
 
@@ -774,6 +873,47 @@ static void poom_nfc_emv_pdol_value_(uint32_t tag, uint8_t* out, size_t len)
 
     switch(tag)
     {
+        case 0x9F02U: /* Amount authorised: USD 1.00 for a deterministic read profile. */
+            value[4] = 0x01U;
+            value_len = 6U;
+            break;
+        case 0x9F03U: /* Amount other. */
+            value_len = 6U;
+            break;
+        case 0x95U: /* Terminal Verification Results: no decision has been made. */
+            value_len = 5U;
+            break;
+        case 0x9CU: /* Goods/services purchase. */
+            value[0] = 0x00U;
+            value_len = 1U;
+            break;
+        case 0x9F1EU: /* IFD serial number. */
+            (void)memcpy(value, "POOM0001", 8U);
+            value_len = 8U;
+            break;
+        case 0x9F15U: /* Merchant category code: unspecified. */
+            value_len = 2U;
+            break;
+        case 0x9F16U: /* Read-only merchant identifier. */
+            (void)memcpy(value, "POOM READ ONLY ", 15U);
+            value_len = 15U;
+            break;
+        case 0x9F1CU: /* Terminal identifier. */
+            (void)memcpy(value, "POOM0001", 8U);
+            value_len = 8U;
+            break;
+        case 0x9F39U: /* Contactless POS entry mode. */
+            value[0] = 0x07U;
+            value_len = 1U;
+            break;
+        case 0x9F41U: /* Transaction sequence counter for this read profile. */
+            value[3] = 0x01U;
+            value_len = 4U;
+            break;
+        case 0x9F4EU: /* Merchant name/location. */
+            (void)memcpy(value, "POOM READ ONLY", 14U);
+            value_len = 14U;
+            break;
         case 0x9F66U: /* Terminal Transaction Qualifiers. */
             /* Read-only EMV-mode terminal; all RFU and unsupported CVM bits stay clear. */
             value[0] = 0x20U;
@@ -1294,6 +1434,16 @@ static void poom_nfc_emv_decode_common_details_(const uint8_t* buf,
             tlv.value,
             tlv.value_len);
     }
+    if(POOM_EMV_DETAILS_FIND(POOM_EMV_TAG_SIGNED_STATIC_APPLICATION_DATA) &&
+       details->signed_static_application_data_len == 0U)
+    {
+        details->signed_static_application_data_len = tlv.value_len;
+    }
+    if(POOM_EMV_DETAILS_FIND(POOM_EMV_TAG_SIGNED_DYNAMIC_APPLICATION_DATA) &&
+       details->signed_dynamic_application_data_len == 0U)
+    {
+        details->signed_dynamic_application_data_len = tlv.value_len;
+    }
     if(POOM_EMV_DETAILS_FIND(POOM_EMV_TAG_DDOL) && details->ddol_len == 0U)
     {
         details->ddol_len = poom_nfc_emv_copy_binary_(
@@ -1581,6 +1731,46 @@ static bool poom_nfc_emv_get_optional_data_(poom_nfc_emv_workspace_t* workspace,
     return result;
 }
 
+static void poom_nfc_emv_store_optional_object_(poom_nfc_emv_card_t* card,
+                                                 uint32_t tag,
+                                                 const uint8_t* response,
+                                                 size_t response_len)
+{
+    poom_tlv_view_t tlv;
+    const uint8_t* value = response;
+    size_t value_len = response_len;
+    poom_nfc_emv_details_t* details;
+
+    if(card == NULL || response == NULL)
+    {
+        return;
+    }
+    details = poom_nfc_emv_details_get_(card);
+    if(details == NULL || details->optional_object_count >= POOM_NFC_EMV_OPTIONAL_OBJECT_MAX)
+    {
+        return;
+    }
+    if(details->optional_objects == NULL)
+    {
+        details->optional_objects = (poom_nfc_emv_data_object_t*)calloc(
+            POOM_NFC_EMV_OPTIONAL_OBJECT_MAX, sizeof(*details->optional_objects));
+        if(details->optional_objects == NULL)
+        {
+            return;
+        }
+    }
+    if(poom_nfc_emv_tlv_find_(response, response_len, tag, &tlv))
+    {
+        value = tlv.value;
+        value_len = tlv.value_len;
+    }
+    poom_nfc_emv_data_object_t* object =
+        &details->optional_objects[details->optional_object_count++];
+    object->tag = tag;
+    object->value_len = poom_nfc_emv_copy_binary_(
+        object->value, sizeof(object->value), value, value_len);
+}
+
 static uint64_t poom_nfc_emv_bcd_amount_(const uint8_t* value, size_t value_len)
 {
     uint64_t result = 0U;
@@ -1831,7 +2021,7 @@ static bool poom_nfc_emv_read_application_with_workspace_(poom_nfc_emv_workspace
     if(afl_len > 0U && (afl_len < 4U || (afl_len % 4U) != 0U))
     {
         out_card->read_status = POOM_NFC_EMV_READ_STATUS_AFL_INVALID;
-        goto read_complete;
+        afl_len = 0U;
     }
     for(size_t i = 0U; i + 3U < afl_len; i += 4U)
     {
@@ -1843,7 +2033,8 @@ static bool poom_nfc_emv_read_application_with_workspace_(poom_nfc_emv_workspace
            offline_records > (uint8_t)(last_record - first_record + 1U))
         {
             out_card->read_status = POOM_NFC_EMV_READ_STATUS_AFL_INVALID;
-            goto read_complete;
+            afl_len = 0U;
+            break;
         }
     }
     out_card->gpo_succeeded = true;
@@ -1872,6 +2063,40 @@ static bool poom_nfc_emv_read_application_with_workspace_(poom_nfc_emv_workspace
             {
                 poom_nfc_emv_decode_records_(
                     response, response_len, out_card, &log_sfi, &log_records);
+            }
+        }
+    }
+    if(afl_len == 0U && !poom_nfc_emv_card_gone_())
+    {
+        /* Some contactless applications return useful records but omit AFL.
+         * Probe a deliberately small window and stop each SFI after two misses. */
+        out_card->fallback_record_sweep_used = true;
+        for(uint8_t sfi = 1U; sfi <= 10U && !poom_nfc_emv_card_gone_(); sfi++)
+        {
+            uint8_t misses = 0U;
+            for(uint8_t record = 1U;
+                record <= 8U && misses < 2U && !poom_nfc_emv_card_gone_();
+                record++)
+            {
+                if(poom_nfc_emv_read_record_(workspace,
+                                             sfi,
+                                             record,
+                                             response,
+                                             sizeof(response),
+                                             &response_len))
+                {
+                    misses = 0U;
+                    poom_nfc_emv_decode_records_(
+                        response, response_len, out_card, &log_sfi, &log_records);
+                }
+                else if(workspace->last_exchange_error == POOM_EMV_EXCHANGE_ERROR_STATUS)
+                {
+                    misses++;
+                }
+                else
+                {
+                    break;
+                }
             }
         }
     }
@@ -1913,6 +2138,30 @@ static bool poom_nfc_emv_read_application_with_workspace_(poom_nfc_emv_workspace
         out_card->application_transaction_counter =
             (uint16_t)(((uint16_t)tlv.value[0] << 8U) | tlv.value[1]);
         out_card->has_application_transaction_counter = true;
+    }
+    {
+        static const uint16_t optional_tags[] = {
+            0x9F50U, 0x9F51U, 0x9F52U, 0x9F5CU, 0x9F14U,
+            0x9F23U, 0x9F58U, 0x9F59U, 0x9F6EU,
+        };
+        for(size_t i = 0U;
+            i < sizeof(optional_tags) / sizeof(optional_tags[0]) &&
+            !poom_nfc_emv_card_gone_();
+            i++)
+        {
+            if(poom_nfc_emv_get_optional_data_(workspace,
+                                                out_card,
+                                                optional_tags[i],
+                                                response,
+                                                sizeof(response),
+                                                &response_len))
+            {
+                poom_nfc_emv_store_optional_object_(
+                    out_card, optional_tags[i], response, response_len);
+                poom_nfc_emv_decode_records_(
+                    response, response_len, out_card, &log_sfi, &log_records);
+            }
+        }
     }
 
     if(!poom_nfc_emv_card_gone_() && log_sfi > 0U && log_records > 0U &&
@@ -2027,10 +2276,22 @@ static bool poom_nfc_emv_choose_app_(const poom_nfc_emv_app_t* app, void* user_c
 
 bool poom_nfc_emv_read_card(poom_nfc_emv_card_t* out_card)
 {
-    static const uint8_t fallback_aids[][7] = {
-        {0xA0U, 0x00U, 0x00U, 0x00U, 0x03U, 0x10U, 0x10U}, /* Visa. */
-        {0xA0U, 0x00U, 0x00U, 0x00U, 0x04U, 0x10U, 0x10U}, /* Mastercard. */
-        {0xA0U, 0x00U, 0x00U, 0x00U, 0x04U, 0x30U, 0x60U}, /* Maestro. */
+    static const struct
+    {
+        uint8_t aid[9];
+        uint8_t aid_len;
+    } fallback_aids[] = {
+        {{0xA0U,0x00U,0x00U,0x00U,0x03U,0x10U,0x10U}, 7U}, /* Visa */
+        {{0xA0U,0x00U,0x00U,0x00U,0x04U,0x10U,0x10U}, 7U}, /* Mastercard */
+        {{0xA0U,0x00U,0x00U,0x00U,0x04U,0x30U,0x60U}, 7U}, /* Maestro */
+        {{0xA0U,0x00U,0x00U,0x00U,0x25U,0x01U,0x07U,0x01U}, 8U}, /* Amex */
+        {{0xA0U,0x00U,0x00U,0x00U,0x65U,0x10U,0x10U}, 7U}, /* JCB */
+        {{0xA0U,0x00U,0x00U,0x01U,0x52U,0x30U,0x10U}, 7U}, /* Discover */
+        {{0xA0U,0x00U,0x00U,0x03U,0x33U,0x01U,0x01U}, 7U}, /* UnionPay */
+        {{0xA0U,0x00U,0x00U,0x02U,0x77U,0x10U,0x10U}, 7U}, /* Interac */
+        {{0xA0U,0x00U,0x00U,0x00U,0x42U,0x90U,0x10U}, 7U}, /* CB */
+        {{0xA0U,0x00U,0x00U,0x06U,0x20U,0x06U,0x20U}, 7U}, /* eftpos */
+        {{0xA0U,0x00U,0x00U,0x05U,0x24U,0x10U,0x10U}, 7U}, /* RuPay */
     };
     size_t response_len = 0U;
     size_t app_count = 0U;
@@ -2078,7 +2339,10 @@ bool poom_nfc_emv_read_card(poom_nfc_emv_card_t* out_card)
     for(size_t i = 0U; i < (sizeof(fallback_aids) / sizeof(fallback_aids[0])); i++)
     {
         if(poom_nfc_emv_read_application_with_workspace_(
-               workspace, fallback_aids[i], sizeof(fallback_aids[i]), out_card))
+               workspace,
+               fallback_aids[i].aid,
+               fallback_aids[i].aid_len,
+               out_card))
         {
             result = true;
             break;
@@ -2162,12 +2426,13 @@ void poom_nfc_emv_format_aip(const poom_nfc_emv_card_t* card, char* out, size_t 
         return;
     }
 
-    if((card->aip[0] & 0x80U) != 0U) poom_nfc_emv_text_append_(out, out_len, "SDA", true);
-    if((card->aip[0] & 0x40U) != 0U) poom_nfc_emv_text_append_(out, out_len, "DDA", true);
-    if((card->aip[0] & 0x20U) != 0U) poom_nfc_emv_text_append_(out, out_len, "CVM", true);
-    if((card->aip[0] & 0x10U) != 0U) poom_nfc_emv_text_append_(out, out_len, "TRM", true);
-    if((card->aip[0] & 0x08U) != 0U) poom_nfc_emv_text_append_(out, out_len, "Issuer auth", true);
-    if((card->aip[0] & 0x02U) != 0U) poom_nfc_emv_text_append_(out, out_len, "CDA", true);
+    if((card->aip[0] & 0x40U) != 0U) poom_nfc_emv_text_append_(out, out_len, "SDA", true);
+    if((card->aip[0] & 0x20U) != 0U) poom_nfc_emv_text_append_(out, out_len, "DDA", true);
+    if((card->aip[0] & 0x10U) != 0U) poom_nfc_emv_text_append_(out, out_len, "CVM", true);
+    if((card->aip[0] & 0x08U) != 0U) poom_nfc_emv_text_append_(out, out_len, "TRM", true);
+    if((card->aip[0] & 0x04U) != 0U) poom_nfc_emv_text_append_(out, out_len, "Issuer auth", true);
+    if((card->aip[0] & 0x02U) != 0U) poom_nfc_emv_text_append_(out, out_len, "CDCVM", true);
+    if((card->aip[0] & 0x01U) != 0U) poom_nfc_emv_text_append_(out, out_len, "CDA", true);
     if(out[0] == '\0')
     {
         (void)snprintf(out, out_len, "No common flags");
@@ -2317,6 +2582,11 @@ void poom_nfc_emv_card_release(poom_nfc_emv_card_t* card)
 {
     if(card != NULL)
     {
+        if(card->details != NULL)
+        {
+            free(card->details->optional_objects);
+            card->details->optional_objects = NULL;
+        }
         free(card->details);
         card->details = NULL;
         free(card->capture);

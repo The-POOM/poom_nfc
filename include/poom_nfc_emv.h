@@ -55,6 +55,8 @@ typedef bool (*poom_nfc_emv_app_cb_t)(const poom_nfc_emv_app_t* app, void* user_
 #define POOM_NFC_EMV_SDA_TAG_LIST_MAX_LEN (32U)
 #define POOM_NFC_EMV_EXPONENT_MAX_LEN (4U)
 #define POOM_NFC_EMV_SCHEME_DATA_MAX_LEN (32U)
+#define POOM_NFC_EMV_OPTIONAL_OBJECT_MAX (12U)
+#define POOM_NFC_EMV_OPTIONAL_VALUE_MAX_LEN (32U)
 
 /* EMV numeric codes encoded as packed BCD. Override at build time if needed. */
 #ifndef POOM_NFC_EMV_TERMINAL_COUNTRY_CODE_BCD
@@ -125,7 +127,24 @@ typedef enum
     POOM_NFC_EMV_SCHEME_UNKNOWN = 0,
     POOM_NFC_EMV_SCHEME_VISA,
     POOM_NFC_EMV_SCHEME_MASTERCARD,
+    POOM_NFC_EMV_SCHEME_AMEX,
+    POOM_NFC_EMV_SCHEME_JCB,
+    POOM_NFC_EMV_SCHEME_DISCOVER,
+    POOM_NFC_EMV_SCHEME_UNIONPAY,
+    POOM_NFC_EMV_SCHEME_INTERAC,
+    POOM_NFC_EMV_SCHEME_CB,
+    POOM_NFC_EMV_SCHEME_EFTPOS,
+    POOM_NFC_EMV_SCHEME_RUPAY,
 } poom_nfc_emv_scheme_t;
+
+
+/** One optional data object returned by GET DATA. */
+typedef struct
+{
+    uint32_t tag;
+    uint8_t value[POOM_NFC_EMV_OPTIONAL_VALUE_MAX_LEN];
+    size_t value_len;
+} poom_nfc_emv_data_object_t;
 
 /** Optional detailed EMV objects, allocated only when at least one is present. */
 typedef struct
@@ -162,6 +181,8 @@ typedef struct
     size_t icc_public_key_exponent_len;
     uint8_t ddol[POOM_NFC_EMV_DOL_MAX_LEN];
     size_t ddol_len;
+    size_t signed_static_application_data_len;
+    size_t signed_dynamic_application_data_len;
     uint8_t customer_exclusive_data[POOM_NFC_EMV_SCHEME_DATA_MAX_LEN];
     size_t customer_exclusive_data_len;
     uint8_t mastercard_application_capabilities[POOM_NFC_EMV_SCHEME_DATA_MAX_LEN];
@@ -170,6 +191,8 @@ typedef struct
     size_t mastercard_9f6c_len;
     uint8_t mastercard_third_party_data[POOM_NFC_EMV_SCHEME_DATA_MAX_LEN];
     size_t mastercard_third_party_data_len;
+    poom_nfc_emv_data_object_t* optional_objects;
+    size_t optional_object_count;
 } poom_nfc_emv_details_t;
 
 /** Complete best-effort read of one EMV application. */
@@ -230,6 +253,7 @@ typedef struct
     poom_nfc_emv_read_status_t read_status;
     poom_nfc_emv_transaction_t transactions[POOM_NFC_EMV_TRANSACTION_MAX];
     size_t transaction_count;
+    bool fallback_record_sweep_used;
     poom_nfc_emv_details_t* details;
     poom_nfc_emv_capture_t* capture;
 } poom_nfc_emv_card_t;
@@ -246,6 +270,9 @@ const char* poom_nfc_emv_kernel_hint_str(poom_nfc_emv_scheme_t scheme);
 /** Format common AIP capabilities into compact human-readable text. */
 void poom_nfc_emv_format_aip(const poom_nfc_emv_card_t* card, char* out, size_t out_len);
 
+
+/** Return a compact name for a common EMV data object, or NULL if unknown. */
+const char* poom_nfc_emv_tag_name(uint32_t tag);
 /** Format Application Usage Control into compact human-readable text. */
 void poom_nfc_emv_format_auc(const poom_nfc_emv_card_t* card, char* out, size_t out_len);
 
